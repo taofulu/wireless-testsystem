@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.db import SessionLocal
-from app.routers import catalog, elaboration, mapping, text_cases
+from app.routers import catalog, confirmation, elaboration, mapping, text_cases
 
 
 @asynccontextmanager
@@ -42,6 +42,7 @@ app = FastAPI(title="Wireless Test System", version="0.1.0", lifespan=lifespan)
 app.include_router(text_cases.router)
 app.include_router(elaboration.router)
 app.include_router(mapping.router)
+app.include_router(confirmation.router)
 app.include_router(catalog.router)
 
 

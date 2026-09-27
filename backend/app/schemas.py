@@ -199,6 +199,43 @@ class StructuredStepOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ---------------------------------------------------------------------------
+# 确认态域（T6）：人工审核、未映射手选、参数编辑、确认闸门
+# ---------------------------------------------------------------------------
+
+
+class StepPatchIn(BaseModel):
+    """单步编辑：可改操作引用与参数（故事 10/11）。
+
+    - aw_operation_id 为 null 表示清空操作（回退 unmapped，允许撤销误选）
+    - 仅提供 params 且不提供 aw_operation_id 时，在原操作上改参数
+    - 提供 aw_operation_id 时按目标操作校验 params（mml_generic 过字典、
+      composite 场景类冻结 scenario_id/scenario_version）
+    """
+
+    model_config = {"extra": "forbid"}
+
+    id: int
+    aw_operation_id: Optional[int] = None
+    params: Optional[dict[str, Any]] = None
+
+
+class StepsPatchIn(BaseModel):
+    """确认态批量编辑：一次提交多个步骤的操作/参数修改。"""
+
+    model_config = {"extra": "forbid"}
+
+    steps: list[StepPatchIn] = Field(min_length=1)
+
+
+class ConfirmationOut(BaseModel):
+    """确认结果：确认后用例进入 confirmed 态。"""
+
+    status: str
+    step_count: int
+    manual_count: int
+
+
 class TextCaseOut(BaseModel):
     """文本用例对外视图（追溯/拓扑字段后续票补充）。"""
 

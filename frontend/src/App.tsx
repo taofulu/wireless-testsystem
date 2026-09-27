@@ -74,6 +74,43 @@ interface StructuredStep {
   mapping_status: StepMappingStatus
 }
 
+type OperationKind = 'mml_family' | 'mml_generic' | 'long_running' | 'instrument_primitive' | 'composite'
+type Simulatable = 'schema_stub' | 'declarative' | 'python' | 'none'
+
+interface Operation {
+  id: number
+  name: string
+  description: string
+  kind: OperationKind
+  device_target: string
+  params_schema: Record<string, unknown>
+  simulatable: Simulatable
+  sim_ref: string | null
+  sim_package_version: string | null
+  suboperations: string[] | null
+}
+
+interface Scenario {
+  id: number
+  scenario_id: string
+  version: string
+  name: string
+  template_type: string | null
+  has_meta: boolean
+}
+
+interface StepDraft {
+  id: number
+  seq: number
+  action_text: string
+  aw_operation_id: number | null
+  params: Record<string, unknown>
+  assertion_text: string
+  mapping_status: StepMappingStatus
+  opChanged: boolean
+  paramsJson: string
+}
+
 interface TextCase {
   id: number
   title: string
@@ -100,7 +137,8 @@ const FIELD_LABELS: Record<ElaborationField, string> = {
 const STATUS_LABELS: Record<string, string> = {
   draft: '草稿',
   elaborating: '扩写中',
-  mapped: '已映射',
+  mapped: '已映射·待确认',
+  confirmed: '已确认',
 }
 
 const ERROR_LABELS: Record<string, string> = {
@@ -125,6 +163,28 @@ const RECLASSIFY_LABELS: Record<string, string> = {
   unknown_command: '命令不在命令字典中',
   bad_type: '参数类型与字典不符',
   out_of_range: '参数超出字典允许范围',
+}
+
+const KIND_LABELS: Record<OperationKind, string> = {
+  mml_family: '高频 MML 命令族',
+  mml_generic: '通用 MML',
+  long_running: '长时操作',
+  instrument_primitive: '仪表原语',
+  composite: '组合操作',
+}
+
+const SIM_LABELS: Record<Simulatable, string> = {
+  schema_stub: '仅桩校验',
+  declarative: '声明式仿真',
+  python: 'Python 仿真',
+  none: '未仿真',
+}
+
+const SIM_COLORS: Record<Simulatable, string> = {
+  schema_stub: '#b45309',
+  declarative: '#15803d',
+  python: '#15803d',
+  none: '#b91c1c',
 }
 
 function statusLabel(status: string): string {
@@ -166,6 +226,11 @@ export function App() {
   const [busy, setBusy] = useState(false)
   const [answerDraft, setAnswerDraft] = useState<Record<number, string>>({})
   const [steps, setSteps] = useState<StructuredStep[]>([])
+  const [stepDrafts, setStepDrafts] = useState<StepDraft[]>([])
+  const [operations, setOperations] = useState<Operation[]>([])
+  const [scenarios, setScenarios] = useState<Scenario[]>([])
+  const [savingSteps, setSavingSteps] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const editingId = selected?.id ?? null
@@ -223,6 +288,134 @@ export function App() {
         /* 步骤拉取失败保留下一次轮询/重试机会，不弹全局错误 */
       })
   }, [])
+
+  const loadOperations = useCallback(() => {
+    fetch('/api/operations')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: Operation[]) => setOperations(data))
+      .catch(() => setOperations([]))
+  }, [])
+
+  const loadScenarios = useCallback(() => {
+    fetch('/api/scenarios')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: Scenario[]) => setScenarios(data))
+      .catch(() => setScenarios([]))
+  }, [])
+
+  function buildDrafts(list: StructuredStep[]): StepDraft[] {
+    return list.map((s) => ({
+      id: s.id,
+      seq: s.seq,
+      action_text: s.action_text,
+      aw_operation_id: s.aw_operation_id,
+      params: s.params,
+      assertion_text: s.assertion_text,
+      mapping_status: s.mapping_status,
+      opChanged: false,
+      paramsJson: JSON.stringify(s.params, null, 2),
+    }))
+  }
+
+  function opById(id: number | null): Operation | undefined {
+    if (id === null) return undefined
+    return operations.find((o) => o.id === id)
+  }
+
+  function updateDraft(stepId: number, patch: Partial<StepDraft>) {
+    setStepDrafts((prev) => prev.map((d) => (d.id === stepId ? { ...d, ...patch } : d)))
+  }
+
+  function handleStepOpChange(stepId: number, opIdStr: string) {
+    const opId = opIdStr === '' ? null : Number(opIdStr)
+    const op = opById(opId)
+    let params: Record<string, unknown> = {}
+    let paramsJson = '{}'
+    if (op?.name === 'play_scenario') {
+      params = { scenario_id: '', scenario_version: '' }
+      paramsJson = JSON.stringify(params, null, 2)
+    }
+    updateDraft(stepId, {
+      aw_operation_id: opId,
+      params,
+      paramsJson,
+      opChanged: true,
+    })
+  }
+
+  function handleStepParamsJson(stepId: number, json: string) {
+    updateDraft(stepId, { paramsJson: json })
+    try {
+      const parsed = JSON.parse(json)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        updateDraft(stepId, { params: parsed as Record<string, unknown> })
+      }
+    } catch {
+      /* 非法 JSON 暂不更新 params，保存时后端会校验 */
+    }
+  }
+
+  function handleScenarioField(stepId: number, field: 'scenario_id' | 'scenario_version', value: string) {
+    setStepDrafts((prev) =>
+      prev.map((d) => {
+        if (d.id !== stepId) return d
+        const params = { ...d.params, [field]: value }
+        // 仅编辑场景参数不改变操作引用，不触发 manual 状态迁移
+        return { ...d, params, paramsJson: JSON.stringify(params, null, 2) }
+      }),
+    )
+  }
+
+  async function saveStepEdits() {
+    if (editingId === null) return
+    setSavingSteps(true)
+    setError(null)
+    const patches = stepDrafts
+      .filter((d) => d.opChanged || JSON.stringify(d.params) !== JSON.stringify(steps.find((s) => s.id === d.id)?.params ?? {}))
+      .map((d) => {
+        const patch: { id: number; aw_operation_id?: number | null; params?: Record<string, unknown> } = { id: d.id }
+        if (d.opChanged) patch.aw_operation_id = d.aw_operation_id
+        patch.params = d.params
+        return patch
+      })
+    try {
+      const r = await fetch(`/api/text-cases/${editingId}/steps`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ steps: patches }),
+      })
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))) as { detail?: unknown }
+        throw new Error(typeof detail.detail === 'string' ? detail.detail : `HTTP ${r.status}`)
+      }
+      const updated = (await r.json()) as StructuredStep[]
+      setSteps(updated)
+      setStepDrafts(buildDrafts(updated))
+    } catch (e) {
+      setError(`保存步骤失败：${(e as Error).message}`)
+    } finally {
+      setSavingSteps(false)
+    }
+  }
+
+  async function confirmCase() {
+    if (editingId === null) return
+    setConfirming(true)
+    setError(null)
+    try {
+      const r = await fetch(`/api/text-cases/${editingId}/confirm`, { method: 'POST' })
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))) as { detail?: string }
+        throw new Error(detail.detail ?? `HTTP ${r.status}`)
+      }
+      refreshSelected(editingId)
+      refreshList()
+    } catch (e) {
+      setError(`确认失败：${(e as Error).message}`)
+    } finally {
+      setConfirming(false)
+    }
+  }
 
   // 映射作业轮询：只取轻量作业视图；到终态后拉步骤并刷新列表（状态变为已映射）
   const pollMapping = useCallback(
@@ -282,14 +475,30 @@ export function App() {
   useEffect(() => {
     if (editingId === null) {
       setSteps([])
+      setStepDrafts([])
       return
     }
     if (mapping?.state === 'succeeded') {
       loadSteps(editingId)
     } else if (mapping === null) {
       setSteps([])
+      setStepDrafts([])
     }
   }, [editingId, mapping?.state, loadSteps])
+
+  // 步骤变化时重建草稿；进入 mapped/confirmed 态时加载操作目录与场景索引
+  useEffect(() => {
+    if (steps.length > 0) {
+      setStepDrafts(buildDrafts(steps))
+    }
+  }, [steps])
+
+  useEffect(() => {
+    if (selected && (selected.status === 'mapped' || selected.status === 'confirmed')) {
+      loadOperations()
+      loadScenarios()
+    }
+  }, [selected?.status, loadOperations, loadScenarios])
 
   function startNew() {
     setSelected(null)
@@ -720,6 +929,244 @@ export function App() {
     )
   }
 
+  function renderConfirmationPanel() {
+    if (!selected) return null
+    if (selected.status !== 'mapped') return null
+
+    const allMapped = stepDrafts.every(
+      (d) => d.mapping_status !== 'unmapped' && d.aw_operation_id !== null,
+    )
+    const mappedCount = stepDrafts.filter((d) => d.mapping_status === 'mapped').length
+    const manualCount = stepDrafts.filter((d) => d.mapping_status === 'manual').length
+    const unmappedCount = stepDrafts.filter((d) => d.mapping_status === 'unmapped').length
+
+    // 按 kind 分组操作目录供下拉
+    const groupedOps: Record<string, Operation[]> = {}
+    for (const op of operations) {
+      const key = `${op.kind}|${op.device_target}`
+      ;(groupedOps[key] ||= []).push(op)
+    }
+    const groupKeys = Object.keys(groupedOps).sort()
+
+    return (
+      <div style={{ ...PANEL_STYLE, borderLeftColor: '#7c3aed' }}>
+        <strong>确认态：人工审核结构化步骤</strong>
+        <p style={{ margin: '0.5rem 0', color: '#444' }}>
+          核对每步的 AW 操作与参数：未映射步骤（红底）从操作目录下拉手选，可编辑任意参数；
+          场景类操作选择场景 ID+版本；全部步骤映射后才可确认。
+        </p>
+        <p style={{ margin: '0.25rem 0', fontSize: '0.9rem' }}>
+          共 {stepDrafts.length} 步：
+          <span style={{ color: '#15803d' }}> 已映射 {mappedCount}</span>
+          <span style={{ color: '#7c3aed' }}> · 手选 {manualCount}</span>
+          <span style={{ color: unmappedCount > 0 ? '#b91c1c' : '#15803d' }}>
+            {' '}
+            · 未映射 {unmappedCount}
+          </span>
+        </p>
+
+        <ol style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+          {stepDrafts.map((d) => {
+            const op = opById(d.aw_operation_id)
+            const isUnmapped = d.mapping_status === 'unmapped'
+            const isScenario = op?.name === 'play_scenario'
+            const sim = op?.simulatable
+            // 场景类操作的仿真可用性还取决于场景 has_meta
+            const scenarioMeta = isScenario
+              ? scenarios.find(
+                  (s) =>
+                    s.scenario_id === (d.params.scenario_id as string) &&
+                    s.version === (d.params.scenario_version as string),
+                )?.has_meta
+              : undefined
+            const realEnvOnly = isScenario && sim === 'declarative' && scenarioMeta === false
+
+            return (
+              <li
+                key={d.id}
+                style={{
+                  border: '1px solid',
+                  borderColor: isUnmapped ? '#fca5a5' : '#cbd5e1',
+                  borderLeft: '4px solid',
+                  borderLeftColor: isUnmapped ? '#dc2626' : '#7c3aed',
+                  background: isUnmapped ? '#fef2f2' : '#fff',
+                  borderRadius: '4px',
+                  padding: '0.5rem 0.75rem',
+                  marginBottom: '0.5rem',
+                }}
+              >
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <strong>#{d.seq}</strong>
+                  <span
+                    style={{
+                      fontSize: '0.75rem',
+                      borderRadius: '4px',
+                      padding: '0 0.4rem',
+                      color: isUnmapped ? '#b91c1c' : d.mapping_status === 'manual' ? '#7c3aed' : '#15803d',
+                      background: isUnmapped ? '#fee2e2' : d.mapping_status === 'manual' ? '#ede9fe' : '#dcfce7',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {isUnmapped ? '未映射' : d.mapping_status === 'manual' ? '手选' : '已映射'}
+                  </span>
+                  {sim && (
+                    <span
+                      style={{
+                        fontSize: '0.7rem',
+                        borderRadius: '4px',
+                        padding: '0 0.4rem',
+                        color: SIM_COLORS[sim],
+                        background: sim === 'none' ? '#fee2e2' : '#f1f5f9',
+                        border: '1px solid #e2e8f0',
+                      }}
+                      title={op ? `操作 ${op.name} 的仿真供给声明` : ''}
+                    >
+                      仿真：{SIM_LABELS[sim]}
+                    </span>
+                  )}
+                  {realEnvOnly && (
+                    <span
+                      style={{
+                        fontSize: '0.7rem',
+                        borderRadius: '4px',
+                        padding: '0 0.4rem',
+                        color: '#b91c1c',
+                        background: '#fee2e2',
+                        fontWeight: 600,
+                      }}
+                    >
+                      真实环境专用
+                    </span>
+                  )}
+                </div>
+                <div style={{ marginTop: '0.25rem' }}>{d.action_text}</div>
+
+                <div style={{ marginTop: '0.4rem', display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+                  <label style={{ fontSize: '0.8rem', color: '#555', flexShrink: 0 }}>
+                    操作：
+                  </label>
+                  <select
+                    value={d.aw_operation_id ?? ''}
+                    onChange={(e) => handleStepOpChange(d.id, e.target.value)}
+                    style={{ fontSize: '0.85rem', padding: '0.2rem' }}
+                  >
+                    <option value="">（未选择）</option>
+                    {groupKeys.map((key) => {
+                      const [kind, target] = key.split('|')
+                      return (
+                        <optgroup key={key} label={`${KIND_LABELS[kind as OperationKind]} · ${target}`}>
+                          {groupedOps[key].map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.name}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )
+                    })}
+                  </select>
+                  {op && (
+                    <span style={{ fontSize: '0.75rem', color: '#888' }}>
+                      {KIND_LABELS[op.kind]} · {op.device_target}
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ marginTop: '0.35rem' }}>
+                  {isScenario ? (
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      <label style={{ fontSize: '0.8rem', color: '#555' }}>
+                        场景 ID：
+                        <input
+                          value={(d.params.scenario_id as string) ?? ''}
+                          onChange={(e) => handleScenarioField(d.id, 'scenario_id', e.target.value)}
+                          style={{ fontSize: '0.85rem', padding: '0.2rem', marginLeft: '0.25rem' }}
+                        />
+                      </label>
+                      <label style={{ fontSize: '0.8rem', color: '#555' }}>
+                        版本：
+                        <input
+                          value={(d.params.scenario_version as string) ?? ''}
+                          onChange={(e) => handleScenarioField(d.id, 'scenario_version', e.target.value)}
+                          style={{ fontSize: '0.85rem', padding: '0.2rem', marginLeft: '0.25rem' }}
+                        />
+                      </label>
+                      {scenarios.length > 0 && (
+                        <select
+                          value=""
+                          onChange={(e) => {
+                            const sc = scenarios.find((s) => s.id === Number(e.target.value))
+                            if (sc) {
+                              handleScenarioField(d.id, 'scenario_id', sc.scenario_id)
+                              handleScenarioField(d.id, 'scenario_version', sc.version)
+                            }
+                          }}
+                          style={{ fontSize: '0.8rem' }}
+                        >
+                          <option value="">从场景索引选择…</option>
+                          {scenarios.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}（{s.scenario_id}@{s.version}）
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                      {scenarios.length === 0 && (
+                        <span style={{ fontSize: '0.75rem', color: '#b45309' }}>
+                          场景索引为空，可手工录入 ID+版本
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <span style={{ fontSize: '0.8rem', color: '#555' }}>参数（JSON）：</span>
+                      <textarea
+                        value={d.paramsJson}
+                        onChange={(e) => handleStepParamsJson(d.id, e.target.value)}
+                        style={{
+                          width: '100%',
+                          minHeight: '3rem',
+                          fontFamily: 'monospace',
+                          fontSize: '0.8rem',
+                          padding: '0.3rem',
+                          marginTop: '0.2rem',
+                          boxSizing: 'border-box',
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {d.assertion_text && (
+                  <div style={{ fontSize: '0.8rem', color: '#444', marginTop: '0.25rem' }}>
+                    断言：{d.assertion_text}
+                  </div>
+                )}
+              </li>
+            )
+          })}
+        </ol>
+
+        <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
+          <button onClick={saveStepEdits} disabled={savingSteps}>
+            {savingSteps ? '保存中…' : '保存步骤修改'}
+          </button>
+          <button
+            onClick={confirmCase}
+            disabled={confirming || !allMapped}
+            title={!allMapped ? '存在未映射步骤，需先为所有步骤选择操作' : ''}
+          >
+            {confirming ? '确认中…' : '确认全部步骤并进入下一阶段'}
+          </button>
+        </div>
+        {!allMapped && (
+          <p style={{ color: '#b91c1c', fontSize: '0.8rem', margin: '0.4rem 0 0' }}>
+            存在未映射步骤，请先为所有步骤选择操作后再确认。
+          </p>
+        )}
+      </div>
+    )
+  }
+
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', padding: '2rem', maxWidth: '72rem' }}>
       <h1>Wireless Test System</h1>
@@ -801,6 +1248,7 @@ export function App() {
 
           {selected && <div style={{ marginTop: '1rem' }}>{renderElaborationPanel()}</div>}
           {selected && <div style={{ marginTop: '1rem' }}>{renderMappingPanel()}</div>}
+          {selected && <div style={{ marginTop: '1rem' }}>{renderConfirmationPanel()}</div>}
         </section>
       </section>
     </main>
