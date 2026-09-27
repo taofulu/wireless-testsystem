@@ -29,6 +29,15 @@ def _create_schema():
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _clean_tables():
+    """内存库跨测试共享，逐测试清表保证用例间隔离。"""
+    yield
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(table.delete())
+
+
 @pytest.fixture()
 def client():
     with TestClient(app) as test_client:

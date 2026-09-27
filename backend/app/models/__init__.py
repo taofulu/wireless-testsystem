@@ -4,5 +4,6 @@
 ``Base.metadata``，供 Alembic 自动生成迁移。
 """
 from app.db import Base  # noqa: F401
+from app.models.text_case import TextCase, TextCaseStatus  # noqa: F401
 
-__all__ = ["Base"]
+__all__ = ["Base", "TextCase", "TextCaseStatus"]
