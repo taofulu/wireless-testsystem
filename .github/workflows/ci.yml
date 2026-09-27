@@ -41,6 +41,9 @@ jobs:
       - name: 运行测试（系统接缝，sqlite）
         run: pytest
       - name: uvicorn 真实启动冒烟
+        env:
+          # T3 起 lifespan 加载操作目录需连库；指向已迁移的测试库
+          WTS_DATABASE_URL: postgresql+psycopg2://wts:wts@localhost:5432/wts_test
         run: |
           uvicorn app.main:app --port 8000 &
           UV_PID=$!
