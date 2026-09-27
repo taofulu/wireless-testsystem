@@ -69,6 +69,14 @@ testbed 环境存在三种复杂场景：已有环境可直接执行、需新建
 45. 作为测试工程师，我想在本机运行一个沙盒 Worker，以便调试任务不出本机、不与任何人争抢共享资源。
 46. 作为测试工程师，我想查看同一代码版本的最近若干次调试会话，以便对比迭代效果。
 47. 作为测试工程师，我想沙盒报告显著标注"仿真执行、未进行环境校验"，以便与真实执行报告区分、不被误用为环境可用性证据。
+48. 作为测试工程师，我想高频 MML 命令族在操作目录中是参数 schema 化的独立条目，以便这些命令的映射精准、参数可校验、可仿真。
+49. 作为测试工程师，我想长尾 MML 命令通过通用 MML 操作执行且必须通过命令字典校验，以便系统不会把 LLM 编造的命令下发给 BBU。
+50. 作为 BBU/网元团队，我想命令字典随 BBU 版本以机器可读形式供给并被系统导入，以便字典维护责任在设备侧、与软件版本对齐。
+51. 作为测试工程师，我想在确认态从 MBB 场景库索引中检索选择场景文件（名称/模板类型），选定即冻结场景 ID 与版本，以便历史用例的播放内容永不失真。
+52. 作为测试工程师，我想"上传+播放场景文件"在界面与报告上是一个完整步骤，以便它与原始文本步骤序号一一对应。
+53. 作为测试工程师，我想场景文件在 MBB 或仪表侧不可达时得到明确的环境类失败提示，以便区分"用例写错了"与"环境没准备好"。
+54. 作为测试工程师，我想升级、起跟踪、导出日志等长时操作执行后拿到制品（日志包/跟踪文件）的可访问路径与校验和，以便事后取证。
+55. 作为测试工程师，我想在确认态就看到该用例含"真实环境专用"的场景播放步骤、沙盒结论必然不可判定，以便提前决定是否还值得本地调试。
 
 ## Implementation Decisions
 
@@ -85,26 +93,41 @@ testbed 环境存在三种复杂场景：已有环境可直接执行、需新建
 - `done`：执行完成（含 `blocked`——环境校验不通过时转 done，结果体带 `env_check_result`）
 
 **模块划分**（backend）：
-- `catalog`——操作目录加载、JSON Schema 校验、检索查询；校验每个操作的仿真供给声明
+- `catalog`——操作目录加载、JSON Schema 校验、检索查询；校验每个操作的仿真供给声明与操作类型（kind/device_target）；命令字典的导入、版本管理与服务端校验；MBB 场景库索引同步（含无 API 降级）
 - `elaboration`——GLM CLI 调用（加载扩写 skill），产出缺失点与追问列表；临时工作目录注入（`input.md` + `terms.json` + 输出 schema），子进程异步，轮询取结果
 - `mapping`——GLM CLI 调用（加载映射 skill），产出结构化步骤；同样子进程异步轮询；候选集预筛注入（操作目录子集 + 术语子集 + 输出 schema）
 - `confirmation`——确认态编辑，处理未映射步骤与手选
 - `rendering`——纯函数：结构化步骤 → pytest 代码（Allure step 标记）
 - `evolution`——参数化进化：槽位值替换 + 复制种子结构化步骤
-- `sandbox`——仿真供给加载（自动桩/声明式效果描述符/Python 仿真包）、虚拟拓扑实例化、调试预设管理、逐步骤仿真级别聚合与三态判决、调试会话记录与保留策略
-- `execution`——任务队列（DB）、LASS 拓扑校验客户端、Worker 注册/心跳/领取/回传 REST API、按执行目标与 Worker 能力路由
+- `sandbox`——仿真供给加载（自动桩/声明式效果描述符/Python 仿真包）、虚拟拓扑实例化、调试预设管理、逐步骤仿真级别聚合与三态判决（组合操作取子操作最差级别）、调试会话记录与保留策略
+- `execution`——任务队列（DB）、LASS 拓扑校验客户端、Worker 注册/心跳/领取/回传 REST API、按执行目标与 Worker 能力路由、场景文件引用传递（直通优先，否则 Worker 凭 ID 拉取上传）、长时操作制品路径回收
 - `reporting`——Allure 解析、步骤级映射、五环追溯查询（仅真实执行）
 - `persistence`——SQLAlchemy 模型层
 
 **数据模型**（PostgreSQL，ADR-0005）：
 - `text_case(id, title, origin enum[seed|evolved], parent_case_id nullable, variable_slots jsonb, precondition, steps_text, expected_text, required_topology jsonb, status, elaboration_qa jsonb, created_at)`
-- `structured_step(id, text_case_id, seq, action_text, aw_operation_id nullable, params jsonb, assertion_text, mapping_status enum[mapped|unmapped|manual])`
+- `structured_step(id, text_case_id, seq, action_text, aw_operation_id nullable, params jsonb, assertion_text, mapping_status enum[mapped|unmapped|manual])`——params 中场景类操作冻结 `{scenario_id, scenario_version}`，通用 MML 操作存 `{command, args}`（落库前已过字典服务端校验）
 - `executable_case(id, text_case_id, version, code text, created_at)`
 - `execution_task(id, executable_case_id, execution_target enum[sandbox|real], status, worker_id nullable, claimed_at, finished_at, heartbeat_at, env_check_result enum[ready|needs_create|needs_modify] nullable, env_check_detail jsonb)`——`execution_target` 区分沙盒传输任务与真实任务；正式执行历史与五环追溯只查 `real`
-- `execution_result(id, task_id, verdict, allure_report jsonb, step_results jsonb, logs text)`
+- `execution_result(id, task_id, verdict, allure_report jsonb, step_results jsonb, logs text, artifacts jsonb)`——artifacts 为 `[{name, kind, uri, checksum}]`，仅 testbed 侧路径与校验和，文件不入库；场景文件不可达等环境类失败在 verdict/错误码中区分于断言失败
 - `debug_run(id, executable_case_id, task_id, verdict enum[passed|failed|inconclusive], step_results jsonb（逐步骤含仿真级别：simulated|schema_stub|unsimulated 与 pass/fail）, preset jsonb, sim_package_version, created_at)`——调试会话业务记录，仅保留最近 N 次（应用层清理），不进五环追溯
 
-**操作目录仿真供给声明**（catalog 每个操作条目新增）：
+**操作分类法**（ADR-0010，catalog 每个条目两个正交维度）：
+
+```
+kind: "mml_family" | "mml_generic" | "long_running" | "instrument_primitive" | "composite"
+device_target: "bbu" | "ue" | "instrument" | "mbb"
+```
+
+- `mml_family`：高频 MML 命令族，参数 schema 化的独立条目
+- `mml_generic`：长尾 MML 通用条目，参数 `{command, args}` 必须通过命令字典服务端校验；字典由 BBU/网元团队随版本供给、系统导入；字典缺失期所有命令转 unmapped
+- `long_running`：升级/起跟踪/导出日志，声明阶段状态与 `produces_artifacts`
+- `instrument_primitive`：仪表原始接口操作
+- `composite`：有序子操作序列的封装（如 play_scenario = resolve→upload→play→wait-ready），对外一个参数 schema、一条报告映射；仿真级别取子操作最差者
+
+**场景文件引用**：场景类步骤参数冻结 `{scenario_id, scenario_version}`；后端同步 MBB 场景库索引（id/version/名称/模板类型/元信息可用性）供确认态下拉，MBB 无查询 API 时降级手工填写 ID+版本、播放时校验；文件传递优先 MBB↔仪表直通，否则 Worker 凭 ID 拉取后上传；不可达为环境类失败。场景文件带机器可读元信息时 play_scenario 可声明式仿真（读元信息改写虚拟仪表状态），否则该步标"未仿真"。
+
+**操作目录仿真供给声明**（catalog 每个操作条目）：
 
 ```
 simulatable: "schema_stub" | "declarative" | "python" | "none"
@@ -149,6 +172,7 @@ sim_package_version: string?     # python 类仿真的包版本
 
 **映射 skill 输出 schema**：`{ steps: [{ seq, action_text, aw_operation_id?, params, assertion_text, mapping_status }] }`
 - `mapping_status=unmapped` 时 `aw_operation_id=null`，确认态高亮
+- 候选集条目携带 `kind`/`device_target`；mml_generic 仅注入相关命令族字典片段；skill 自报合法的长尾命令落库前仍须通过后端字典二次校验，不过即转 unmapped（不信任 LLM 自报）
 
 **进化接口**：`POST /text-cases/{id}/evolve`（种子用例 id，body `{slot_values}`）
 - 复制种子结构化步骤到新用例
@@ -156,7 +180,7 @@ sim_package_version: string?     # python 类仿真的包版本
 - 追溯链五环自动生成
 
 **API 契约**（REST）：
-- 前端：`POST /text-cases`（创建）、`POST /text-cases/{id}/elaborate`（触发扩写）、`POST /text-cases/{id}/map`（触发映射）、`GET /operations?q=`、`PATCH /text-cases/{id}/steps`（确认态编辑）、`POST /text-cases/{id}/generate`、`POST /executable-cases/{id}/debug`（发起沙盒调试，body 可选 preset）、`GET /executable-cases/{id}/debug-runs`（最近 N 次调试会话）、`POST /executable-cases/{id}/execute`（正式真实执行；沙盒 inconclusive 后调用须带确认标记）、`POST /executable-cases/{id}/recheck`、`POST /text-cases/{id}/evolve`
+- 前端：`POST /text-cases`（创建）、`POST /text-cases/{id}/elaborate`（触发扩写）、`POST /text-cases/{id}/map`（触发映射）、`GET /operations?q=`、`GET /scenarios?q=`（场景库索引检索；MBB 无 API 时返回空索引并降级手工录入）、`PATCH /text-cases/{id}/steps`（确认态编辑）、`POST /text-cases/{id}/generate`、`POST /executable-cases/{id}/debug`（发起沙盒调试，body 可选 preset）、`GET /executable-cases/{id}/debug-runs`（最近 N 次调试会话）、`POST /executable-cases/{id}/execute`（正式真实执行；沙盒 inconclusive 后调用须带确认标记）、`POST /executable-cases/{id}/recheck`、`POST /text-cases/{id}/evolve`
 - Worker：`POST /worker/register`、`POST /worker/tasks/claim`（按能力过滤）、`POST /worker/tasks/{id}/heartbeat`、`POST /worker/tasks/{id}/result`
 - LASS：环境校验 API（三值 + 详细说明）
 
@@ -166,6 +190,7 @@ sim_package_version: string?     # python 类仿真的包版本
 - DB 唯一主存（0005）；GLM CLI 子进程异步（0006）
 - 扩写前置（0007）；参数化进化血缘落库（0008）
 - 沙盒仿真先于真实 testbed，三态判决、禁止假绿、只许上游修复（0009）
+- AW 操作五分类、MML 命令字典服务端校验、场景文件版本冻结引用、制品只存路径（0010）
 
 **技术栈**：后端 FastAPI + SQLAlchemy + PostgreSQL；前端 React；Worker 独立 Python 包（sandbox/real 双能力模式）；GLM 5.2 本地 CLI。
 
@@ -178,7 +203,10 @@ sim_package_version: string?     # python 类仿真的包版本
 - **沙盒分支测试**：用最小仿真包夹具（declarative + python + none 三类操作各一）驱动三种判决——全 simulated 通过判 passed、断言失败判 failed、含 stub/none 步骤判 inconclusive；断言前端提交真实执行时 inconclusive 需确认标记、passed 不需要。
 - **能力路由测试**：注册 sandbox/real 两类 Worker，断言 sandbox 任务不被 real Worker 领取、反之亦然；心跳超时后任务可被重新领取。
 - **上游修复闭环测试**：沙盒 failed 后断言系统不存在代码编辑入口（API 层 404/405 守护），只能经 PATCH steps → 重新 generate 产生新版本。
-- **纯函数单测**：模板渲染（快照断言）、Allure 解析、声明式效果描述符解释器、三态判决聚合。
+- **命令字典校验测试**：fake 字典夹具（命中/缺失命令、参数越界/类型错），断言映射 skill 自报合法的 mml_generic 输出被服务端二次校验拦截并转 unmapped；字典整体缺失时所有通用 MML 步骤转 unmapped 而非放行。
+- **组合操作聚合测试**：play_scenario 子操作序列中任一为 none/unsimulated 时整步判 inconclusive；子操作全 declarative 时按场景元信息仿真并可真实判定断言。
+- **场景索引降级测试**：MBB 查询 API 不可用时手工录入 scenario_id+version 可保存与确认；Worker 回报文件不可达时任务归类环境类失败（区别于断言失败）。
+- **纯函数单测**：模板渲染（快照断言，覆盖五种 kind 的模板分支）、Allure 解析、声明式效果描述符解释器、三态判决聚合、命令字典校验器。
 - **Worker**：fake 后端（httpx mock）测注册/轮询/幂等领取/心跳摘除/回传；sandbox 模式以真实 pytest 子进程 + 桩 AW 包守护端到端（沿用 ai-hero-cli `cli.pilot.test.ts` 真实进程管道模式）。
 - **Prior art**：ai-hero-cli 命令层接缝 + fake LLM + 临时目录，及 `cli.pilot.test.ts` 真实进程管道守护模式。
 
@@ -196,6 +224,8 @@ sim_package_version: string?     # python 类仿真的包版本
 - **从真实 LASS 环境快照生成虚拟拓扑（LASS 无快照能力）**
 - **在沙盒中扮演 LASS 三值校验（三值分支由 fake LASS 测试与真实联调覆盖）**
 - **直接编辑生成代码（架构性禁止，非延后功能）**
+- **制品文件入库存储（MVP 只记 testbed 侧路径与校验和）**
+- **MBB 场景文件内容内嵌进用例、场景文件编辑/生成能力（本系统只消费场景库产出）**
 
 ## Further Notes
 
@@ -206,3 +236,6 @@ sim_package_version: string?     # python 类仿真的包版本
 - 种子用例的"认证"（标记 origin=seed）是质量杠杆，应设审批机制（MVP 可手动标记）。
 - 术语库 repo 地址需提供，系统启动时 pin commit 加载。
 - debug_run 保留次数 N 为配置项，初值建议 20。
+- 命令字典的机器可读格式、供给渠道与版本对齐方式需 BBU/网元团队确认；联调前至少完成高频命令族的字典整理。
+- MBB 场景库的查询/下载 API 形态、MBB↔仪表直通通道是否存在，需联调前确认；决定 `GET /scenarios` 与 Worker 文件传递的实现方式。
+- 数据模板的机器可读元信息覆盖率直接决定场景类用例的沙盒价值，应推动 MBB 侧先为核心模板配套。
