@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 FIXTURE = Path(__file__).parent / "fixtures" / "fake_glm_cli.py"
 
 
@@ -82,3 +84,53 @@ def test_malformed_injection_json_fails(tmp_path):
     proc = _run(wd, "mapping-skill")
     assert proc.returncode != 0
     assert "terms.json" in proc.stderr
+
+
+def test_elaboration_sufficient_scenario(monkeypatch, tmp_path):
+    monkeypatch.setenv("FAKE_GLM_ELABORATION", "sufficient")
+    wd = _prepare_workdir(tmp_path, {"properties": {"sufficient": {}}})
+    proc = _run(wd, "elaboration-skill")
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads((wd / "result.json").read_text(encoding="utf-8"))
+    assert result["sufficient"] is True
+    assert result["missing_points"] == []
+
+
+def test_elaboration_fail_scenario_exits_nonzero(monkeypatch, tmp_path):
+    monkeypatch.setenv("FAKE_GLM_ELABORATION", "fail")
+    wd = _prepare_workdir(tmp_path, {"properties": {"sufficient": {}}})
+    proc = _run(wd, "elaboration-skill")
+    assert proc.returncode != 0
+    assert not (wd / "result.json").exists()
+
+
+def test_elaboration_malformed_scenario_writes_bad_json(monkeypatch, tmp_path):
+    monkeypatch.setenv("FAKE_GLM_ELABORATION", "malformed")
+    wd = _prepare_workdir(tmp_path, {"properties": {"sufficient": {}}})
+    proc = _run(wd, "elaboration-skill")
+    assert proc.returncode == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads((wd / "result.json").read_text(encoding="utf-8"))
+
+
+def test_elaboration_write_and_hang_scenario_writes_result_before_sleep(monkeypatch, tmp_path):
+    """契约守护：CLI 可以写完 result.json 后仍不退出；后端按文件存在性取结果。"""
+    import time
+
+    monkeypatch.setenv("FAKE_GLM_ELABORATION", "write_and_hang")
+    monkeypatch.setenv("FAKE_GLM_SLEEP_SECONDS", "30")
+    wd = _prepare_workdir(tmp_path, {"properties": {"sufficient": {}}})
+    proc = subprocess.Popen(
+        [sys.executable, str(FIXTURE), "--skill", "elaboration-skill", "--workdir", str(wd)]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not (wd / "result.json").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        result = json.loads((wd / "result.json").read_text(encoding="utf-8"))
+        assert result["sufficient"] is True
+        # 结果已就绪时进程仍挂起
+        assert proc.poll() is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

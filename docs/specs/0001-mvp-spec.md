@@ -168,7 +168,7 @@ sim_package_version: string?     # python 类仿真的包版本
 **扩写 skill 输出 schema**：`{ sufficient: bool, missing_points: [{field, question}], elaborated_text?: string }`
 - `sufficient=false` 时进入 `elaborating` 态，前端展示 `missing_points`
 - 用户回答后合并为新版 `input.md`，再次提交扩写（可迭代）
-- 用户强制跳过时直接进入 `mapped` 态（跳过扩写评估）
+- 闸门结论（`sufficient=true` 或强制跳过）记录在 `elaboration_qa` JSON 中；用例状态停留在 `elaborating`，并不直接进入 `mapped`——`mapped` 的语义是"结构化步骤已生成"，由后续 `POST /text-cases/{id}/map`（T5）消费闸门、调用映射 skill 后置位。跳过仅表示豁免扩写评估，不产出结构化步骤，因此不能让跳过动作单独把状态推到 `mapped`。闸门通过/跳过后若继续编辑标题或三栏文本，既有结论失效（回到待重新扩写），防止未评估文本流入映射
 
 **映射 skill 输出 schema**：`{ steps: [{ seq, action_text, aw_operation_id?, params, assertion_text, mapping_status }] }`
 - `mapping_status=unmapped` 时 `aw_operation_id=null`，确认态高亮

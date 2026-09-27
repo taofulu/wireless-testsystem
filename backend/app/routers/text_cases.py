@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.elaboration import ElaborationConflict, apply_text_case_patch
 from app.models import TextCase, TextCaseStatus
 from app.schemas import TextCaseCreate, TextCaseOut, TextCasePatch
 
@@ -54,14 +55,20 @@ def get_text_case(case_id: int, db: Session = Depends(get_db)):
 def patch_text_case(
     case_id: int, payload: TextCasePatch, db: Session = Depends(get_db)
 ):
-    """继续编辑草稿：仅更新提供的字段，状态保持不变。"""
+    """继续编辑：更新提供的字段。
+
+    状态不回退；但若扩写闸门已通过（sufficient/skipped）且评估输入被改动，
+    闸门失效回退 answered，防止未评估文本直接流入映射（ADR-0007）。
+    """
     case = db.get(TextCase, case_id)
     if case is None:
         raise HTTPException(status_code=404, detail="text case not found")
 
     updates = payload.model_dump(exclude_unset=True)
-    for field, value in updates.items():
-        setattr(case, field, value)
+    try:
+        apply_text_case_patch(case, updates)
+    except ElaborationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     db.commit()
     db.refresh(case)
     return case

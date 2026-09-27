@@ -2,12 +2,15 @@
 
 字段与状态机遵循 spec 数据模型与 8 态用例状态机
 （draft → elaborating → mapped → confirmed → generated → queued → running → done）。
-T2 纵切片只落库录入字段；origin/血缘/拓扑/扩写 QA 等字段在后续票加入。
+扩写阶段（T4）不新增状态：用例进入 elaborating 后，细粒度作业状态存于
+elaboration_qa（running/awaiting_answers/answered/sufficient/skipped/failed），
+映射（T5）仅在闸门 sufficient/skipped 后允许触发。
 """
 import enum
 from datetime import datetime, timezone
+from typing import Optional
 
-from sqlalchemy import DateTime, String, Text
+from sqlalchemy import JSON, DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -38,8 +41,16 @@ class TextCase(Base):
     status: Mapped[TextCaseStatus] = mapped_column(
         default=TextCaseStatus.DRAFT, nullable=False
     )
+    # 扩写问答状态（spec 数据模型 elaboration_qa jsonb）：None 表示从未触发。
+    # 结构见 app.elaboration（_new_qa）与 schemas.ElaborationOut。
+    elaboration_qa: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+    @property
+    def elaboration(self) -> Optional[dict]:
+        """对外视图字段（TextCaseOut.elaboration）直接取 elaboration_qa。"""
+        return self.elaboration_qa

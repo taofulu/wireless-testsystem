@@ -12,10 +12,22 @@
 
 仅使用标准库，保证在未安装后端依赖的环境（如真实 Worker 机）也能执行。
 真实进程测试见 test_fake_glm_cli.py。
+
+扩写场景由环境变量 FAKE_GLM_ELABORATION 选择（模拟同一份用例在不同轮次/
+质量下的评估结论），供 T4 全链路测试驱动状态分支：
+    insufficient（默认） 充分性不足，产出 missing_points
+    sufficient           充分，直接通过
+    fail                 注入文件校验通过后进程失败（非零退出、不写 result.json）
+    malformed            写出无法解析的 result.json
+    slow                 长时间不退出、不写结果（配合后端超时验证 timeout 失败态）
+    write_and_hang       写完 result.json 后进程挂起不退出（守护后端按文件
+                         存在性轮询取结果，而非死等进程退出）
 """
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 ELABORATION_RESULT = {
@@ -84,6 +96,46 @@ def _read_injection_files(workdir: Path) -> None:
                 raise SystemExit(2)
 
 
+ELABORATION_SUFFICIENT_RESULT = {
+    "sufficient": True,
+    "missing_points": [],
+    "elaborated_text": None,
+}
+
+
+def _write_elaboration_result(workdir: Path) -> None:
+    """按 FAKE_GLM_ELABORATION 产出扩写结论或模拟 CLI 故障。"""
+    scenario = os.environ.get("FAKE_GLM_ELABORATION", "insufficient")
+    if scenario == "slow":
+        time.sleep(float(os.environ.get("FAKE_GLM_SLEEP_SECONDS", "30")))
+        return
+    if scenario == "fail":
+        print("fake_glm_cli: 模拟 CLI 内部错误，扩写 agent 循环中断", file=sys.stderr)
+        raise SystemExit(3)
+
+    if scenario == "sufficient":
+        result = ELABORATION_SUFFICIENT_RESULT
+    elif scenario == "insufficient":
+        result = ELABORATION_RESULT
+    elif scenario == "write_and_hang":
+        (workdir / "result.json").write_text(
+            json.dumps(ELABORATION_SUFFICIENT_RESULT, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        time.sleep(float(os.environ.get("FAKE_GLM_SLEEP_SECONDS", "30")))
+        return
+    elif scenario == "malformed":
+        (workdir / "result.json").write_text("{ 这不是合法 JSON", encoding="utf-8")
+        return
+    else:
+        print(f"fake_glm_cli: 未知扩写场景 {scenario!r}", file=sys.stderr)
+        raise SystemExit(2)
+
+    (workdir / "result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="glm-cli")
     parser.add_argument("--skill", required=True)
@@ -97,10 +149,12 @@ def main(argv=None) -> int:
 
     _read_injection_files(workdir)
     mode = _detect_mode(args.skill, workdir)
-    result = ELABORATION_RESULT if mode == "elaboration" else MAPPING_RESULT
-    (workdir / "result.json").write_text(
-        json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    if mode == "elaboration":
+        _write_elaboration_result(workdir)
+    else:
+        (workdir / "result.json").write_text(
+            json.dumps(MAPPING_RESULT, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
     return 0
 
 

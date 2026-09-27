@@ -26,8 +26,99 @@ class TextCasePatch(BaseModel):
     expected_text: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# 扩写域（T4）：充分性评估、缺失点追问、多轮问答
+# ---------------------------------------------------------------------------
+
+# missing_points.field 只能指向三栏（追问必须能合并回原文某个栏目）
+ElaborationField = Literal["precondition", "steps_text", "expected_text"]
+
+# 扩写作业细粒度状态（存于 text_case.elaboration_qa，不新增用例状态）
+ElaborationState = Literal[
+    "running",            # CLI 子进程执行中
+    "awaiting_answers",   # sufficient=false，等待工程师逐条回答
+    "answered",           # 答案已合并为新版本，可再次扩写或跳过
+    "sufficient",         # CLI 判定充分，扩写闸门通过
+    "skipped",            # 工程师强制跳过，扩写闸门通过
+    "failed",             # CLI 超时/失败/坏输出，允许重试或跳过
+]
+ElaborationErrorCode = Literal[
+    "timeout",       # CLI 在超时窗口内未产出 result.json
+    "cli_failed",    # 无法启动 / 非零退出
+    "bad_result",    # result.json 缺失或不符合输出 schema
+    "interrupted",   # 服务重启导致在途作业中断（启动时回收）
+]
+
+
+class MissingPoint(BaseModel):
+    """扩写 skill 输出 schema 中的单条追问（spec 168 行）。"""
+
+    model_config = {"extra": "forbid"}
+
+    field: ElaborationField
+    question: str = Field(min_length=1, max_length=500)
+
+
+class ElaborationCLIResult(BaseModel):
+    """GLM CLI result.json 的边界校验；不信任子进程输出的形状。"""
+
+    model_config = {"extra": "forbid"}
+
+    sufficient: bool
+    missing_points: list[MissingPoint] = Field(default_factory=list)
+    elaborated_text: Optional[str] = None
+
+
+class ElaborationAnswerIn(BaseModel):
+    """逐条回答：field+question 必须与当轮 missing_points 对应，防止过期表单。"""
+
+    model_config = {"extra": "forbid"}
+
+    field: ElaborationField
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(min_length=1, max_length=5000)
+
+
+class ElaborationAnswersIn(BaseModel):
+    answers: list[ElaborationAnswerIn] = Field(min_length=1)
+
+
+class MissingPointOut(BaseModel):
+    field: str
+    question: str
+
+
+class ElaborationAnswerOut(BaseModel):
+    field: str
+    question: str
+    answer: str
+
+
+class ElaborationRoundOut(BaseModel):
+    """单轮评估及其问答，多轮迭代全程留痕。"""
+
+    round: int
+    missing_points: list[MissingPointOut] = Field(default_factory=list)
+    answers: list[ElaborationAnswerOut] = Field(default_factory=list)
+
+
+class ElaborationErrorOut(BaseModel):
+    code: ElaborationErrorCode
+    detail: Optional[str] = None
+
+
+class ElaborationOut(BaseModel):
+    """扩写状态对外视图：前端据此渲染轮询进度、问答表单与失败提示。"""
+
+    state: ElaborationState
+    round: int
+    missing_points: list[MissingPointOut] = Field(default_factory=list)
+    rounds: list[ElaborationRoundOut] = Field(default_factory=list)
+    error: Optional[ElaborationErrorOut] = None
+
+
 class TextCaseOut(BaseModel):
-    """文本用例对外视图（录入阶段字段子集，追溯/拓扑字段后续票补充）。"""
+    """文本用例对外视图（追溯/拓扑字段后续票补充）。"""
 
     id: int
     title: str
@@ -35,6 +126,7 @@ class TextCaseOut(BaseModel):
     steps_text: str
     expected_text: str
     status: str
+    elaboration: Optional[ElaborationOut] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
