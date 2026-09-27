@@ -1,0 +1,35 @@
+{
+  "version": "demo-bbu-v1.2",
+  "commands": [
+    {
+      "command": "ACT_CELL",
+      "description": "激活小区",
+      "params": [
+        {"name": "cell_id", "type": "int", "min": 0, "max": 65535, "description": "小区标识"}
+      ]
+    },
+    {
+      "command": "MOD_CELL",
+      "description": "修改小区属性",
+      "params": [
+        {"name": "cell_id", "type": "int", "min": 0, "max": 65535},
+        {"name": "power_dbm", "type": "float", "min": -60.0, "max": 30.0, "description": "发射功率"}
+      ]
+    },
+    {
+      "command": "BLK_CELL",
+      "description": "闭锁小区",
+      "params": [
+        {"name": "cell_id", "type": "int", "min": 0, "max": 65535},
+        {"name": "reason", "type": "string", "allowed_values": ["maintenance", "fault"]}
+      ]
+    },
+    {
+      "command": "DSP_CELL",
+      "description": "动态查询小区状态",
+      "params": [
+        {"name": "cell_id", "type": "int", "min": 0, "max": 65535}
+      ]
+    }
+  ]
+}

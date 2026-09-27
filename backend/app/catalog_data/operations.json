@@ -1,0 +1,87 @@
+[
+  {
+    "name": "act_cell",
+    "description": "激活指定小区（高频 MML 命令族 ACT_CELL 的参数化封装）",
+    "kind": "mml_family",
+    "device_target": "bbu",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "cell_id": {"type": "integer", "minimum": 0, "maximum": 65535}
+      },
+      "required": ["cell_id"]
+    },
+    "simulatable": "declarative",
+    "sim_ref": "sims/act_cell.json"
+  },
+  {
+    "name": "run_mml",
+    "description": "长尾 MML 命令通用执行入口，命令与参数必须通过命令字典服务端校验",
+    "kind": "mml_generic",
+    "device_target": "bbu",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "command": {"type": "string"},
+        "args": {"type": "object"}
+      },
+      "required": ["command", "args"]
+    },
+    "simulatable": "schema_stub",
+    "dictionary_ref": "bbu-mml-dict"
+  },
+  {
+    "name": "export_logs",
+    "description": "导出 BBU 日志包（长时操作，产出制品，MVP 仅记录路径与校验和）",
+    "kind": "long_running",
+    "device_target": "bbu",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "log_type": {"type": "string", "enum": ["alarm", "trace", "system"]}
+      },
+      "required": ["log_type"]
+    },
+    "simulatable": "declarative",
+    "sim_ref": "sims/export_logs.json",
+    "stages": ["start", "collect", "finish"],
+    "produces_artifacts": true
+  },
+  {
+    "name": "set_rf_power",
+    "description": "设置仪表射频输出功率（有状态仿真：设置后可读回）",
+    "kind": "instrument_primitive",
+    "device_target": "instrument",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "power_dbm": {"type": "number", "minimum": -60, "maximum": 30}
+      },
+      "required": ["power_dbm"]
+    },
+    "simulatable": "declarative",
+    "sim_ref": "sims/set_rf_power.json"
+  },
+  {
+    "name": "play_scenario",
+    "description": "定位、上传并播放 MBB 场景文件，等待播放就绪（组合操作）",
+    "kind": "composite",
+    "device_target": "instrument",
+    "params_schema": {
+      "type": "object",
+      "properties": {
+        "scenario_id": {"type": "string"},
+        "scenario_version": {"type": "string"}
+      },
+      "required": ["scenario_id", "scenario_version"]
+    },
+    "simulatable": "declarative",
+    "sim_ref": "sims/play_scenario.json",
+    "suboperations": [
+      "resolve_scenario_file",
+      "upload_to_instrument",
+      "play_file",
+      "wait_ready"
+    ]
+  }
+]
