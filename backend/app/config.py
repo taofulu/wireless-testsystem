@@ -22,5 +22,8 @@ class Settings(BaseSettings):
     glm_mapping_skill: str = "mapping-skill"
     glm_timeout_seconds: float = 60.0
 
+    # 执行域（T8）：Worker 心跳超时摘除秒数；Worker 崩溃/断网后任务重领窗口
+    worker_heartbeat_timeout_seconds: float = 300.0
+
 
 settings = Settings()

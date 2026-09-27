@@ -11,6 +11,11 @@ from app.models.catalog import (  # noqa: F401
     Scenario,
 )
 from app.models.executable_case import ExecutableCase  # noqa: F401
+from app.models.execution import (  # noqa: F401
+    ExecutionResult,
+    ExecutionTask,
+    Worker,
+)
 from app.models.mapping import MappingStatus, StructuredStep  # noqa: F401
 from app.models.text_case import TextCase, TextCaseStatus  # noqa: F401
 
@@ -25,4 +30,7 @@ __all__ = [
     "StructuredStep",
     "MappingStatus",
     "ExecutableCase",
+    "Worker",
+    "ExecutionTask",
+    "ExecutionResult",
 ]

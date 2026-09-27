@@ -425,3 +425,94 @@ class ScenarioOut(BaseModel):
     has_meta: bool
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# 执行域（T8）：Worker 注册、能力路由、沙盒调试、结果回传
+# ---------------------------------------------------------------------------
+
+
+# 执行目标二值（CONTEXT.md）：Literal 约束让非法能力值直接被 422 拦截
+Capability = Literal["sandbox", "real"]
+
+
+class WorkerRegisterIn(BaseModel):
+    """Worker 启动注册与信息更新（spec 157 行契约）；重复注册视为续约更新。"""
+
+    model_config = {"extra": "forbid"}
+
+    worker_id: str = Field(min_length=1, max_length=100)
+    capabilities: list[Capability] = Field(min_length=1)
+    sim_package_version: Optional[str] = Field(default=None, max_length=50)
+    topology_tags: Optional[list[str]] = Field(default=None)
+
+
+class WorkerHeartbeatIn(BaseModel):
+    """Worker 保活心跳（独立于任务心跳：空闲 Worker 也需保活不被摘除）。"""
+
+    model_config = {"extra": "forbid"}
+
+    worker_id: str = Field(min_length=1, max_length=100)
+
+
+class WorkerClaimIn(BaseModel):
+    """Worker 领取任务的身份声明；能力过滤以注册表为准（防自报绕过隔离）。"""
+
+    model_config = {"extra": "forbid"}
+
+    worker_id: str = Field(min_length=1, max_length=100)
+    # capabilities 供客户端自报一致性校验；实际过滤以 worker.capabilities 为准
+    capabilities: list[Capability] = Field(default_factory=list)
+
+
+class WorkerOut(BaseModel):
+    """Worker 注册响应。"""
+
+    worker_id: str
+    capabilities: list[str]
+    sim_package_version: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class TaskClaimOut(BaseModel):
+    """任务领取响应：含可执行用例引用，Worker 凭此拉取代码。"""
+
+    task_id: int
+    executable_case_id: int
+    execution_target: str
+
+    model_config = {"from_attributes": True}
+
+
+class TaskResultIn(BaseModel):
+    """Worker 执行完成后的结果回传。"""
+
+    model_config = {"extra": "forbid"}
+
+    worker_id: str = Field(min_length=1, max_length=100)
+    verdict: Literal["passed", "failed"]
+    logs: str
+    step_results: list[Any] = Field(default_factory=list)
+    artifacts: list[Any] = Field(default_factory=list)
+
+
+class TaskResultOut(BaseModel):
+    """结果回传落库响应。"""
+
+    task_id: int
+    verdict: str
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutionTaskOut(BaseModel):
+    """任务简要视图。"""
+
+    id: int
+    executable_case_id: int
+    execution_target: str
+    status: str
+    worker_id: Optional[str] = None
+
+    model_config = {"from_attributes": True}
