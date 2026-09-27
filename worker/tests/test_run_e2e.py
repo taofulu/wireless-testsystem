@@ -1,4 +1,4 @@
-"""T8 沙盒通路端到端守护：真实 wts-worker 进程 + 真实 pytest 子进程。
+"""T8 real 通路端到端守护：真实 wts-worker 进程 + 真实 pytest 子进程。
 
 用标准库 HTTP 服务器扮演后端（fake 只注在系统边界），断言完整链路：
 注册 → 心跳 → claim → 拉代码 → 临时落盘 → pytest 执行（桩 AW）→
@@ -7,6 +7,9 @@
 与 Issue #9 验收对应：
 - "Worker 拉取代码临时落盘、执行后清理，回传结果"
 - "沙盒模式用真实 pytest 子进程 + 桩 AW 包做端到端守护"
+
+T9 之后：execution_target=sandbox 的任务走沙盒内核（见 test_sandbox_e2e.py）；
+本文件守护 real 通路（T8 L1 桩包，真实 AW 接入在 T12）。
 """
 import http.server
 import json
@@ -109,13 +112,13 @@ def _make_handler(state: _FakeBackend):
                 state.claims += 1
                 if state.claims == 1 and state.code is not None:
                     self._json(200, {"task_id": 1, "executable_case_id": 1,
-                                     "execution_target": "sandbox"})
+                                     "execution_target": "real"})
                 else:
                     self._json(204, None)
             elif self.path.endswith("/heartbeat"):
                 state.task_heartbeats += 1
                 self._json(200, {"task_id": 1, "executable_case_id": 1,
-                                 "execution_target": "sandbox"})
+                                 "execution_target": "real"})
             elif self.path.endswith("/result"):
                 state.results.append(body)
                 self._json(201, {"task_id": 1, "verdict": body["verdict"]})
@@ -153,9 +156,9 @@ def _run_worker(base_url: str, work_root: Path, extra_args=()) -> subprocess.Com
             "--server",
             base_url,
             "--worker-id",
-            "e2e-sandbox-01",
+            "e2e-real-01",
             "--capabilities",
-            "sandbox",
+            "real",
             "--work-root",
             str(work_root),
             "--poll-interval",
@@ -179,13 +182,13 @@ def test_e2e_passing_case_full_path(backend, tmp_path):
     proc = _run_worker(base_url, tmp_path)
     assert proc.returncode == 0, proc.stderr
 
-    assert state.registered and state.registered[0]["worker_id"] == "e2e-sandbox-01"
-    assert state.registered[0]["capabilities"] == ["sandbox"]
+    assert state.registered and state.registered[0]["worker_id"] == "e2e-real-01"
+    assert state.registered[0]["capabilities"] == ["real"]
     assert state.claims == 1
     assert state.fetched_code == 1
     assert len(state.results) == 1
     result = state.results[0]
-    assert result["worker_id"] == "e2e-sandbox-01"
+    assert result["worker_id"] == "e2e-real-01"
     assert result["verdict"] == "passed"
     assert "1 passed" in result["logs"]
     # 临时落盘执行后清理（故事 30）

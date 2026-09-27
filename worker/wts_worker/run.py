@@ -19,7 +19,7 @@ from typing import List, Optional
 import httpx
 
 from wts_worker.client import WorkerClient
-from wts_worker.runner import TaskOutcome, run_pytest_case
+from wts_worker.runner import TaskOutcome, run_pytest_case, run_sandbox_case
 
 
 class _Heartbeat:
@@ -117,6 +117,35 @@ def _submit_with_retry(
             time.sleep(retry_interval)
 
 
+def _execute_task(
+    client: WorkerClient,
+    task: dict,
+    *,
+    work_root: Path,
+    task_timeout: float,
+    sim_package_dir: str,
+) -> TaskOutcome:
+    """按任务 execution_target 分发执行通路（ADR-0009 能力路由的 Worker 侧）。
+
+    - sandbox：拉取沙盒上下文（仿真供给 + 调试预设），走 T9 沙盒内核，
+      产出三态判决与逐步骤仿真标注
+    - real：T8 真实通路（L1 桩包 pytest；真实 AW 接入在 T12）
+    """
+    task_id = task["task_id"]
+    exec_id = task["executable_case_id"]
+    code = client.fetch_code(exec_id)
+    if task.get("execution_target") == "sandbox":
+        context = client.fetch_sandbox_context(exec_id, task_id)
+        return run_sandbox_case(
+            code,
+            context,
+            work_root,
+            timeout_seconds=task_timeout,
+            sim_package_dir=sim_package_dir,
+        )
+    return run_pytest_case(code, work_root, timeout_seconds=task_timeout)
+
+
 def run_worker(
     server: str,
     worker_id: str,
@@ -127,6 +156,7 @@ def run_worker(
     heartbeat_interval: float = 5.0,
     task_timeout: float = 600.0,
     sim_package_version: Optional[str] = None,
+    sim_package_dir: str = "",
     once: bool = False,
 ) -> int:
     """Worker 主循环；返回进程退出码。"""
@@ -152,11 +182,17 @@ def run_worker(
 
             task_id = task["task_id"]
             exec_id = task["executable_case_id"]
-            print(f"[wts-worker] 领取任务 {task_id}（exec_case={exec_id}）")
+            target = task.get("execution_target", "?")
+            print(f"[wts-worker] 领取任务 {task_id}（exec_case={exec_id}, target={target}）")
             heartbeat.set_task(task_id)
             try:
-                code = client.fetch_code(exec_id)
-                outcome = run_pytest_case(code, work_root, timeout_seconds=task_timeout)
+                outcome = _execute_task(
+                    client,
+                    task,
+                    work_root=work_root,
+                    task_timeout=task_timeout,
+                    sim_package_dir=sim_package_dir,
+                )
             except Exception as exc:  # Worker 自身不随任务崩溃
                 outcome = TaskOutcome(verdict="failed", logs=f"worker 内部错误: {exc}")
             finally:

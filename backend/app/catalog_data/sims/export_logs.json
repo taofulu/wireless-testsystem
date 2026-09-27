@@ -1,0 +1,13 @@
+{
+  "description": "导出日志包：虚拟 BBU 立即产出一个日志包记录（长时操作声明式仿真为立即完成）",
+  "writes": [
+    {"path": "bbu.last_log_package.type", "value": "<log_type>"},
+    {"path": "bbu.last_log_package.state", "value": "ready"}
+  ],
+  "returns": {
+    "ok": true,
+    "log_type": "<log_type>",
+    "package_uri": "sandbox://bbu/logs/<log_type>.tar.gz",
+    "state": "@bbu.last_log_package.state"
+  }
+}

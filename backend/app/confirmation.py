@@ -238,3 +238,22 @@ def confirm_case(db: Session, case: TextCase) -> dict[str, Any]:
         "step_count": len(steps),
         "manual_count": manual_count,
     }
+
+
+# ---------------------------------------------------------------------------
+# 上游修复重开（T10，故事 43：沙盒失败只许回上游修复）
+# ---------------------------------------------------------------------------
+
+
+def reopen_to_confirmation(db: Session, case: TextCase) -> None:
+    """generated → mapped：回确认态改映射（POST /text-cases/{id}/reopen）。
+
+    沙盒调试失败后的两条修复路径之一（另一条是改文本重新映射，由
+    PATCH /text-cases/{id} 的状态回退承担）。重开后结构化步骤原样保留、
+    确认态恢复可编辑；再次确认并 generate 产生新版本，代码永远 100%
+    由模板渲染产出（ADR-0001/0009：系统不提供任何代码编辑入口）。
+    """
+    if case.status != TextCaseStatus.GENERATED:
+        raise ConfirmationConflict("仅 generated 态用例可回确认态改映射")
+    case.status = TextCaseStatus.MAPPED
+    db.commit()

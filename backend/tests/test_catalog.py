@@ -46,7 +46,7 @@ def test_demo_catalog_auto_loaded_with_all_five_kinds(client):
 
 
 def test_get_operations_search_by_name(client):
-    resp = client.get("/operations", params={"q": "scenario"})
+    resp = client.get("/operations", params={"q": "play_scenario"})
     assert resp.status_code == 200
 
     names = [item["name"] for item in resp.json()]

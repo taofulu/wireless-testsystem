@@ -93,6 +93,18 @@ class WorkerClient:
         resp.raise_for_status()
         return resp.json()["code"]
 
+    def fetch_sandbox_context(self, executable_case_id: int, task_id: int) -> dict:
+        """拉取沙盒内核执行上下文（T9）：逐步骤仿真供给 + 该任务的调试预设。
+
+        携带 task_id 使后端按任务行取 preset；预设只属于本次调试会话。
+        """
+        resp = self._client.get(
+            f"/executable-cases/{executable_case_id}/sandbox-context",
+            params={"task_id": task_id},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def submit_result(
         self,
         task_id: int,

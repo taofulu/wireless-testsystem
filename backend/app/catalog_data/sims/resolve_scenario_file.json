@@ -1,0 +1,7 @@
+{
+  "description": "定位场景文件：把解析结果写入虚拟 MBB 状态",
+  "writes": [
+    {"path": "mbb.resolved_file", "value": "scenario://<scenario_id>/<scenario_version>"}
+  ],
+  "returns": {"ok": true, "file_uri": "@mbb.resolved_file"}
+}

@@ -1,0 +1,8 @@
+{
+  "description": "激活小区：在虚拟 BBU 状态树中把目标小区管理态置为 active",
+  "writes": [
+    {"path": "bbu.cell_<cell_id>.admin_state", "value": "active"},
+    {"path": "bbu.cell_<cell_id>.cell_id", "value": "<cell_id>"}
+  ],
+  "returns": {"ok": true, "cell_id": "<cell_id>", "admin_state": "@bbu.cell_<cell_id>.admin_state"}
+}

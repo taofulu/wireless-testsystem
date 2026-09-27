@@ -25,5 +25,9 @@ class Settings(BaseSettings):
     # 执行域（T8）：Worker 心跳超时摘除秒数；Worker 崩溃/断网后任务重领窗口
     worker_heartbeat_timeout_seconds: float = 300.0
 
+    # 沙盒调试（T9/T10）：同一可执行用例版本保留的最近调试会话次数
+    # （ADR-0009 / spec Further Notes：debug_run 保留次数 N 为配置项，初值 20）
+    debug_run_keep_latest: int = 20
+
 
 settings = Settings()

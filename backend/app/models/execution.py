@@ -50,6 +50,9 @@ class ExecutionTask(Base):
     execution_target: Mapped[str] = mapped_column(String(10), nullable=False)
     status: Mapped[str] = mapped_column(String(10), default="queued", nullable=False)
     worker_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # 沙盒调试预设（虚拟设备初始状态；T9）：仅 sandbox 任务携带，回传后
+    # 复制进 debug_run 快照；不写入用例正式数据（ADR-0009）
+    preset: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

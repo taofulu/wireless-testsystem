@@ -1,0 +1,7 @@
+{
+  "description": "设置射频功率：写入虚拟仪表状态并可读回（有状态仿真演示）",
+  "writes": [
+    {"path": "instrument.rf_power_dbm", "value": "<power_dbm>"}
+  ],
+  "returns": {"ok": true, "rf_power_dbm": "@instrument.rf_power_dbm"}
+}

@@ -1,14 +1,23 @@
-"""确认态路由：步骤编辑与确认闸门（T6，故事 8–12、51、55）。
+"""确认态路由：步骤编辑与确认闸门（T6，故事 8–12、51、55）；
+T10 加入上游修复重开（generated → mapped，故事 43）。
 
 链路：UI → PATCH /text-cases/{id}/steps（编辑操作/参数）→ POST /confirm
 （全部映射后确认）→ persistence（ADR-0002/0010）。
 """
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.confirmation import ConfirmationConflict, StepEditError, confirm_case, update_steps
+from app.confirmation import (
+    ConfirmationConflict,
+    StepEditError,
+    confirm_case,
+    reopen_to_confirmation,
+    update_steps,
+)
 from app.db import get_db
 from app.models import TextCase
+from app.models.mapping import MappingStatus, StructuredStep
 from app.schemas import ConfirmationOut, StepsPatchIn, StructuredStepOut
 
 router = APIRouter(prefix="/text-cases", tags=["confirmation"])
@@ -56,3 +65,29 @@ def confirm(case_id: int, db: Session = Depends(get_db)):
     except ConfirmationConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return result
+
+
+@router.post("/{case_id}/reopen", response_model=ConfirmationOut)
+def reopen(case_id: int, db: Session = Depends(get_db)):
+    """回确认态改映射（T10，故事 43）：generated → mapped。
+
+    沙盒失败后的修复路径之一：结构化步骤原样保留并恢复确认态编辑；
+    重新确认后 generate 产生新版本（代码永远 100% 模板渲染，ADR-0009）。
+    """
+    case = _get_case_or_404(db, case_id)
+    try:
+        reopen_to_confirmation(db, case)
+    except ConfirmationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    steps = db.execute(
+        select(StructuredStep)
+        .where(StructuredStep.text_case_id == case.id)
+        .order_by(StructuredStep.seq)
+    ).scalars().all()
+    return ConfirmationOut(
+        status=case.status.value,
+        step_count=len(steps),
+        manual_count=sum(
+            1 for s in steps if s.mapping_status == MappingStatus.MANUAL.value
+        ),
+    )

@@ -1,4 +1,5 @@
-"""execution 模块：Worker 注册/心跳/能力路由领取/结果回传与沙盒调试任务（T8）。
+"""execution 模块：Worker 注册/心跳/能力路由领取/结果回传与沙盒调试任务（T8）；
+T9/T10 加入调试会话落库与真实执行二次确认闸门。
 
 职责（spec 模块划分 execution 的 T8 切片；LASS 校验与真实执行在 T11/T12）：
 - Worker 注册表：启动注册（同 worker_id 重复注册视为续约更新）、保活心跳、
@@ -11,6 +12,11 @@
   （断网重试不重复执行同一任务，故事 29/32）
 - 故障恢复：任务心跳超时（Worker 崩溃/断网）→ 任务回收为 queued 可被重领；
   Worker 心跳超时 → 从注册表摘除（故事 32）
+- 沙盒回传落 debug_run（T9）：sandbox 任务完成即生成调试会话业务记录，
+  三态判决与逐步骤仿真标注随会话保留最近 N 次（ADR-0009，不进五环追溯）
+- 真实执行闸门（T10）：依据该代码版本最近一次调试会话判决放行——passed 直接
+  入队；inconclusive/无调试结论须带二次确认标记（响应附未覆盖步骤清单）；
+  failed 一律拒绝，只许回上游修复（故事 43/44）
 
 并发说明：sqlite 测试库经 WAL + busy_timeout 串行化写者；生产 PostgreSQL
 下条件 UPDATE 的行级谓词同样保证原子领取，无需 SELECT FOR UPDATE。
@@ -21,7 +27,7 @@
 任务幂等无害，real 通路的防护在 T12 评估）。
 """
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -29,6 +35,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models import ExecutableCase, TextCase, TextCaseStatus
 from app.models.execution import ExecutionResult, ExecutionTask, Worker
+from app.models.mapping import StructuredStep
+from app.sandbox import latest_debug_run, record_debug_run, uncovered_steps
 from app.schemas import TaskResultIn, WorkerRegisterIn
 
 # 并发领取撞车时重选候选的上限（赢者恰好一个由条件 UPDATE 保证）
@@ -120,11 +128,14 @@ def _reap_stale(db: Session, now: datetime) -> None:
 # ---------------------------------------------------------------------------
 
 
-def create_debug_task(db: Session, exec_case: ExecutableCase) -> ExecutionTask:
+def create_debug_task(
+    db: Session, exec_case: ExecutableCase, preset: Optional[dict] = None
+) -> ExecutionTask:
     """为可执行用例发起一次沙盒调试任务（spec API 契约）。
 
     沙盒调试在 generated 态内闭环（ADR-0009）：只创建 execution_target=sandbox
-    的 queued 任务，不迁移用例状态；调试会话业务记录（debug_run）在 T9/T10。
+    的 queued 任务，不迁移用例状态；调试预设随任务携带，回传后进入
+    debug_run 快照（仅存于调试会话上下文，不写入用例正式数据，故事 40）。
     """
     case = db.get(TextCase, exec_case.text_case_id)
     if case is None or case.status != TextCaseStatus.GENERATED:
@@ -133,6 +144,7 @@ def create_debug_task(db: Session, exec_case: ExecutableCase) -> ExecutionTask:
         executable_case_id=exec_case.id,
         execution_target="sandbox",
         status="queued",
+        preset=preset,
     )
     db.add(task)
     db.commit()
@@ -253,7 +265,9 @@ def submit_result(
 
     重复回传（Worker 未收到响应的重试）抛 TaskConflict——已有结果不被覆盖，
     Worker 侧将 409 视为"已记录"（故事 29 幂等）。
-    沙盒通路不迁移用例状态（generated 态内闭环）；real 通路状态机在 T12。
+    沙盒通路不迁移用例状态（generated 态内闭环），回传同时落 debug_run
+    调试会话（T9：三态判决 + 逐步骤仿真标注 + preset 快照，保留最近 N 次）；
+    real 通路状态机在 T12。
     sim_package_version 取执行 Worker 的注册声明（ADR-0009：沙盒报告记录仿真
     包版本，为仿真与 catalog 漂移排查留证据），不信任 Worker 回传自报。
     """
@@ -279,4 +293,100 @@ def submit_result(
     db.add(result)
     db.commit()
     db.refresh(result)
+
+    if task.execution_target == "sandbox":
+        record_debug_run(
+            db,
+            task,
+            verdict=payload.verdict,
+            step_results=payload.step_results,
+            sim_package_version=worker.sim_package_version,
+        )
     return result
+
+
+# ---------------------------------------------------------------------------
+# 真实执行提交（T10 闸门骨架；LASS 三值校验在 T11 插入）
+# ---------------------------------------------------------------------------
+
+
+class ExecuteConflict(Exception):
+    """真实执行提交被闸门拦截；路由按 code 转 409（附未覆盖步骤清单）。"""
+
+    def __init__(
+        self,
+        code: str,
+        detail: str,
+        uncovered: Optional[list[int]] = None,
+    ):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+        self.uncovered = uncovered
+
+
+def _all_step_seqs(db: Session, exec_case: ExecutableCase) -> list[int]:
+    """用例全部结构化步骤序号（无调试结论时视为全部未覆盖）。"""
+    return list(
+        db.execute(
+            select(StructuredStep.seq)
+            .where(StructuredStep.text_case_id == exec_case.text_case_id)
+            .order_by(StructuredStep.seq)
+        ).scalars().all()
+    )
+
+
+def submit_real_execution(
+    db: Session, exec_case: ExecutableCase, confirm_inconclusive: bool
+) -> ExecutionTask:
+    """提交真实执行（POST /executable-cases/{id}/execute，故事 43/44）。
+
+    闸门依据该代码版本最近一次调试会话判决：
+    - passed：直接放行入队（不需要确认）
+    - failed：一律拒绝——沙盒失败只许回上游修复并重新生成新版本（ADR-0009）
+    - inconclusive / 尚无调试结论：必须携带 confirm_inconclusive 二次确认
+      标记；未携带时返回未覆盖步骤清单（仅桩校验/未仿真步骤）供知情决策
+
+    放行即创建 execution_target=real 的 queued 任务，用例状态 generated →
+    queued（spec 状态机）；LASS 三值环境校验在 T11 插入本函数放行点之前。
+    """
+    case = db.get(TextCase, exec_case.text_case_id)
+    if case is None or case.status != TextCaseStatus.GENERATED:
+        raise ExecuteConflict(
+            "not_generated", "仅 generated 态用例可提交真实执行"
+        )
+
+    latest = latest_debug_run(db, exec_case.id)
+    if latest is not None and latest.verdict == "failed":
+        raise ExecuteConflict(
+            "sandbox_failed",
+            "最近一次沙盒调试判决为 failed：请回确认态改映射或改文本重新映射，"
+            "重新生成新版本后再调试",
+        )
+
+    if latest is None or latest.verdict != "passed":
+        uncovered = (
+            uncovered_steps(latest.step_results)
+            if latest is not None
+            else _all_step_seqs(db, exec_case)
+        )
+        if not confirm_inconclusive:
+            reason = (
+                "沙盒判决不可判定" if latest is not None else "尚无沙盒调试结论"
+            )
+            raise ExecuteConflict(
+                "confirmation_required",
+                f"{reason}：存在未被仿真覆盖的步骤，提交真实执行需二次确认",
+                uncovered=uncovered,
+            )
+
+    task = ExecutionTask(
+        executable_case_id=exec_case.id,
+        execution_target="real",
+        status="queued",
+    )
+    db.add(task)
+    case.status = TextCaseStatus.QUEUED
+    db.commit()
+    db.refresh(task)
+    return task

@@ -1,0 +1,7 @@
+{
+  "description": "等待就绪：声明式仿真立即转入 ready（长时等待在沙盒中压缩为立即完成）",
+  "writes": [
+    {"path": "instrument.playing.state", "value": "ready"}
+  ],
+  "returns": {"ok": true, "state": "@instrument.playing.state"}
+}

@@ -1,0 +1,8 @@
+{
+  "description": "播放场景（组合操作主描述符）：组合语义由子操作序列承载，主描述符仅记录场景引用到虚拟仪表状态",
+  "writes": [
+    {"path": "instrument.playing.scenario_id", "value": "<scenario_id>"},
+    {"path": "instrument.playing.scenario_version", "value": "<scenario_version>"}
+  ],
+  "returns": {"ok": true, "playing": "@instrument.playing"}
+}

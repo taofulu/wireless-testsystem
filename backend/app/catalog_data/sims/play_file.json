@@ -1,0 +1,9 @@
+{
+  "description": "启动播放：虚拟仪表记录正在播放的场景",
+  "writes": [
+    {"path": "instrument.playing.scenario_id", "value": "<scenario_id>"},
+    {"path": "instrument.playing.scenario_version", "value": "<scenario_version>"},
+    {"path": "instrument.playing.state", "value": "starting"}
+  ],
+  "returns": {"ok": true}
+}

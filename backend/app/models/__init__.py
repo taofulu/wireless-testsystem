@@ -10,6 +10,7 @@ from app.models.catalog import (  # noqa: F401
     Operation,
     Scenario,
 )
+from app.models.debug import DebugRun  # noqa: F401
 from app.models.executable_case import ExecutableCase  # noqa: F401
 from app.models.execution import (  # noqa: F401
     ExecutionResult,
@@ -33,4 +34,5 @@ __all__ = [
     "Worker",
     "ExecutionTask",
     "ExecutionResult",
+    "DebugRun",
 ]

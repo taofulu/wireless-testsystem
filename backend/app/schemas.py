@@ -486,12 +486,16 @@ class TaskClaimOut(BaseModel):
 
 
 class TaskResultIn(BaseModel):
-    """Worker 执行完成后的结果回传。"""
+    """Worker 执行完成后的结果回传。
+
+    verdict 三态（ADR-0009）：passed/failed/inconclusive；inconclusive 由
+    沙盒内核在存在仅桩校验或未仿真步骤时产出（禁止假绿）。
+    """
 
     model_config = {"extra": "forbid"}
 
     worker_id: str = Field(min_length=1, max_length=100)
-    verdict: Literal["passed", "failed"]
+    verdict: Literal["passed", "failed", "inconclusive"]
     logs: str
     step_results: list[Any] = Field(default_factory=list)
     artifacts: list[Any] = Field(default_factory=list)
@@ -516,3 +520,121 @@ class ExecutionTaskOut(BaseModel):
     worker_id: Optional[str] = None
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# 沙盒调试域（T9/T10）：调试预设、沙盒上下文、调试会话、真实执行闸门
+# ---------------------------------------------------------------------------
+
+# 沙盒报告的固定声明（ADR-0009：与真实执行报告区分，不得误用为环境可用性证据）
+SANDBOX_ENVIRONMENT_DISCLAIMER = "仿真执行、未进行环境校验"
+
+# 逐步骤仿真级别（CONTEXT.md：simulated|schema_stub|unsimulated）
+SimLevel = Literal["simulated", "schema_stub", "unsimulated"]
+
+
+class DebugIn(BaseModel):
+    """发起沙盒调试的可选参数：调试预设（虚拟设备初始状态）。
+
+    预设仅存于 debug_run 上下文，不写入用例正式数据（故事 40，ADR-0009）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    preset: Optional[dict[str, Any]] = None
+
+
+class SandboxSubStepOut(BaseModel):
+    """组合操作的子操作仿真供给视图（仿真级别取子操作最差者的输入）。
+
+    descriptor/sim_ref 与主步骤同语义：Worker 侧组合解释器据此执行子操作。
+    """
+
+    name: str
+    simulatable: SimLevel
+    descriptor: Optional[dict[str, Any]] = None
+    sim_ref: Optional[str] = None
+
+
+class SandboxStepOut(BaseModel):
+    """沙盒上下文中的单步仿真供给：Worker 内核据此分发桩/声明式/Python 仿真。"""
+
+    seq: int
+    op_name: str
+    kind: str
+    device_target: str
+    # 有效仿真级别（已按 composite 最差子操作、场景元信息门聚合）
+    simulatable: SimLevel
+    # L1 桩校验依据（schema_stub 级别必需；其余级别附带供调试面板展示）
+    params_schema: dict[str, Any] = Field(default_factory=dict)
+    # declarative 供给的效果描述符内容（后端从 catalog_dir 内联；缺失即 None
+    # 并在 effective 级别上已降级为 unsimulated）
+    descriptor: Optional[dict[str, Any]] = None
+    # python 供给的仿真实现引用（module:function）
+    sim_ref: Optional[str] = None
+    produces_artifacts: bool = False
+    suboperations: list[SandboxSubStepOut] = Field(default_factory=list)
+
+
+class SandboxContextOut(BaseModel):
+    """沙盒上下文：Worker 内核执行用例所需的全部仿真供给 + 调试预设。"""
+
+    executable_case_id: int
+    steps: list[SandboxStepOut]
+    preset: Optional[dict[str, Any]] = None
+
+
+class SandboxStepMetaOut(BaseModel):
+    """确认态/调试面板的逐步骤仿真覆盖视图（故事 41/55：提前知情）。
+
+    simulatable 字段承载的是聚合后的有效级别（SimLevel），不是目录声明值。
+    """
+
+    seq: int
+    op_name: str
+    simulatable: SimLevel
+
+
+class SandboxMetaOut(BaseModel):
+    """用例级仿真覆盖概览：任一 unsimulated 步骤即预告沙盒必然 inconclusive。"""
+
+    executable_case_id: int
+    steps: list[SandboxStepMetaOut]
+    has_uncovered: bool
+
+
+class DebugRunOut(BaseModel):
+    """调试会话对外视图（故事 41/42/46/47）。"""
+
+    id: int
+    executable_case_id: int
+    task_id: int
+    verdict: str
+    step_results: list[Any]
+    preset: Optional[dict[str, Any]] = None
+    sim_package_version: Optional[str] = None
+    # 固定声明：仿真执行未进行环境校验（ADR-0009）
+    environment_disclaimer: str = SANDBOX_ENVIRONMENT_DISCLAIMER
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DebugRunListOut(BaseModel):
+    """最近 N 次调试会话（N 为配置项 debug_run_keep_latest）。"""
+
+    keep_latest: int
+    runs: list[DebugRunOut]
+
+
+class ExecuteIn(BaseModel):
+    """提交真实执行（T10 骨架；LASS 三值校验在 T11 插入）。
+
+    沙盒判决为 inconclusive（或无调试结论）时必须携带 confirm_inconclusive
+    二次确认标记才放行（故事 44）；passed 不需要确认；failed 一律拒绝——
+    只许回上游修复（故事 43）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    confirm_inconclusive: bool = False

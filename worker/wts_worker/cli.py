@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--sim-package-version", default=None, help="仿真包版本号（沙盒 Worker 声明）"
     )
+    run_parser.add_argument(
+        "--sim-package-dir",
+        default="",
+        help="AW 团队 Python 仿真包目录（simulatable=python 的操作由此加载；可选）",
+    )
     return parser
 
 
@@ -85,6 +90,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             heartbeat_interval=args.heartbeat_interval,
             task_timeout=args.task_timeout,
             sim_package_version=args.sim_package_version,
+            sim_package_dir=args.sim_package_dir,
             once=args.once,
         )
     return 2

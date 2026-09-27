@@ -1,0 +1,7 @@
+{
+  "description": "上传场景文件到虚拟仪表",
+  "writes": [
+    {"path": "instrument.uploaded", "value": "scenario://<scenario_id>/<scenario_version>"}
+  ],
+  "returns": {"ok": true, "uploaded": "@instrument.uploaded"}
+}
