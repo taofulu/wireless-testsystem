@@ -7,6 +7,7 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.db
 
 # Node
 node_modules/
@@ -20,5 +21,7 @@ dist/
 allure-results/
 allure-report/
 
-# OS
+# OS / 编辑器
 .DS_Store
+.idea/
+.vscode/
