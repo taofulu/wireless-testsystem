@@ -117,6 +117,88 @@ class ElaborationOut(BaseModel):
     error: Optional[ElaborationErrorOut] = None
 
 
+# ---------------------------------------------------------------------------
+# 映射域（T5）：GLM 映射结构化步骤、异步作业轮询（ADR-0001/0002/0006/0010）
+# ---------------------------------------------------------------------------
+
+# 映射作业细粒度状态（存于 text_case.mapping_job，不新增用例状态）
+MappingState = Literal[
+    "running",      # CLI 子进程执行中
+    "succeeded",    # 结构化步骤已落库（可能含被服务端对账降级的 unmapped 步骤）
+    "failed",       # CLI 超时/失败/坏输出，允许重试
+]
+MappingErrorCode = Literal[
+    "timeout",       # CLI 在超时窗口内未产出 result.json
+    "cli_failed",    # 无法启动 / 非零退出
+    "bad_result",    # result.json 缺失、不符合输出 schema 或步骤序列非法
+    "interrupted",   # 服务重启导致在途作业中断（启动时回收）
+    "internal_error",  # 作业线程内部错误兜底，避免作业永久卡在 running
+]
+
+# 映射 skill 只能自报 mapped/unmapped；manual 是确认态人工手选产物（T6）
+CLIMappingStatus = Literal["mapped", "unmapped"]
+StepMappingStatus = Literal["mapped", "unmapped", "manual"]
+
+
+class MappingCLIStepIn(BaseModel):
+    """映射 skill 输出 schema 中的单条结构化步骤（spec 173 行契约）。"""
+
+    model_config = {"extra": "forbid"}
+
+    seq: int = Field(ge=1)
+    action_text: str = Field(min_length=1, max_length=2000)
+    aw_operation_id: Optional[int] = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    assertion_text: str = Field(default="", max_length=2000)
+    mapping_status: CLIMappingStatus
+
+
+class MappingCLIResult(BaseModel):
+    """GLM CLI result.json 的边界校验；不信任子进程输出的形状。"""
+
+    model_config = {"extra": "forbid"}
+
+    steps: list[MappingCLIStepIn] = Field(min_length=1)
+
+
+class MappingErrorOut(BaseModel):
+    code: MappingErrorCode
+    detail: Optional[str] = None
+
+
+class ReclassificationOut(BaseModel):
+    """服务端对账把 LLM 自报 mapped 降级为 unmapped 的留痕（确认态提示分类）。"""
+
+    seq: int
+    code: str
+    detail: Optional[str] = None
+
+
+class MappingJobOut(BaseModel):
+    """映射作业对外视图：前端据此轮询进度、展示步骤统计与失败提示。"""
+
+    state: MappingState
+    error: Optional[MappingErrorOut] = None
+    step_count: Optional[int] = None
+    mapped_count: Optional[int] = None
+    unmapped_count: Optional[int] = None
+    reclassifications: list[ReclassificationOut] = Field(default_factory=list)
+
+
+class StructuredStepOut(BaseModel):
+    """结构化步骤对外视图：确认态（T6）与渲染（T7）消费的落库数据。"""
+
+    id: int
+    seq: int
+    action_text: str
+    aw_operation_id: Optional[int] = None
+    params: dict[str, Any]
+    assertion_text: str
+    mapping_status: StepMappingStatus
+
+    model_config = {"from_attributes": True}
+
+
 class TextCaseOut(BaseModel):
     """文本用例对外视图（追溯/拓扑字段后续票补充）。"""
 
@@ -127,6 +209,7 @@ class TextCaseOut(BaseModel):
     expected_text: str
     status: str
     elaboration: Optional[ElaborationOut] = None
+    mapping: Optional[MappingJobOut] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

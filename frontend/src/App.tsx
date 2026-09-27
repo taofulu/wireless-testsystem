@@ -41,6 +41,39 @@ interface Elaboration {
   error: ElaborationError | null
 }
 
+type MappingState = 'running' | 'succeeded' | 'failed'
+type StepMappingStatus = 'mapped' | 'unmapped' | 'manual'
+
+interface MappingError {
+  code: string
+  detail: string | null
+}
+
+interface Reclassification {
+  seq: number
+  code: string
+  detail: string | null
+}
+
+interface MappingJob {
+  state: MappingState
+  error: MappingError | null
+  step_count: number | null
+  mapped_count: number | null
+  unmapped_count: number | null
+  reclassifications: Reclassification[]
+}
+
+interface StructuredStep {
+  id: number
+  seq: number
+  action_text: string
+  aw_operation_id: number | null
+  params: Record<string, unknown>
+  assertion_text: string
+  mapping_status: StepMappingStatus
+}
+
 interface TextCase {
   id: number
   title: string
@@ -49,6 +82,7 @@ interface TextCase {
   expected_text: string
   status: string
   elaboration: Elaboration | null
+  mapping: MappingJob | null
   created_at: string
 }
 
@@ -66,12 +100,31 @@ const FIELD_LABELS: Record<ElaborationField, string> = {
 const STATUS_LABELS: Record<string, string> = {
   draft: '草稿',
   elaborating: '扩写中',
+  mapped: '已映射',
 }
 
 const ERROR_LABELS: Record<string, string> = {
   timeout: '扩写评估超时',
   cli_failed: 'GLM CLI 执行失败',
   bad_result: 'GLM 输出不符合约定',
+}
+
+const MAPPING_ERROR_LABELS: Record<string, string> = {
+  timeout: '映射执行超时',
+  cli_failed: 'GLM CLI 执行失败',
+  bad_result: 'GLM 输出不符合约定（或步骤序列非法）',
+  interrupted: '服务重启导致作业中断，请重试',
+  internal_error: '映射服务内部错误，请重试',
+}
+
+const RECLASSIFY_LABELS: Record<string, string> = {
+  missing_operation: '缺少操作目录引用',
+  unknown_operation: '引用的操作不存在',
+  bad_mml_params: 'MML 参数形状不合法',
+  dictionary_missing: '命令字典未导入',
+  unknown_command: '命令不在命令字典中',
+  bad_type: '参数类型与字典不符',
+  out_of_range: '参数超出字典允许范围',
 }
 
 function statusLabel(status: string): string {
@@ -112,11 +165,16 @@ export function App() {
   const [saving, setSaving] = useState(false)
   const [busy, setBusy] = useState(false)
   const [answerDraft, setAnswerDraft] = useState<Record<number, string>>({})
+  const [steps, setSteps] = useState<StructuredStep[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const editingId = selected?.id ?? null
   const qa = selected?.elaboration ?? null
   const running = qa?.state === 'running'
+  const mapping = selected?.mapping ?? null
+  const mappingRunning = mapping?.state === 'running'
+  // 映射闸门：扩写评估通过或强制跳过后才允许触发（服务端同样强校验）
+  const mappingGatePassed = qa?.state === 'sufficient' || qa?.state === 'skipped'
 
   const syncCase = useCallback((data: TextCase) => {
     setSelected(data)
@@ -157,6 +215,36 @@ export function App() {
       })
   }, [])
 
+  const loadSteps = useCallback((id: number) => {
+    fetch(`/api/text-cases/${id}/steps`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: StructuredStep[]) => setSteps(data))
+      .catch(() => {
+        /* 步骤拉取失败保留下一次轮询/重试机会，不弹全局错误 */
+      })
+  }, [])
+
+  // 映射作业轮询：只取轻量作业视图；到终态后拉步骤并刷新列表（状态变为已映射）
+  const pollMapping = useCallback(
+    (id: number) => {
+      fetch(`/api/text-cases/${id}/mapping`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((data: MappingJob) => {
+          setSelected((prev) =>
+            prev && prev.id === id ? { ...prev, mapping: data } : prev,
+          )
+          if (data.state === 'succeeded') {
+            loadSteps(id)
+            refreshList()
+          }
+        })
+        .catch(() => {
+          /* 单次轮询失败静默，下一拍重试 */
+        })
+    },
+    [loadSteps, refreshList],
+  )
+
   useEffect(() => {
     let cancelled = false
     fetch('/api/health')
@@ -182,6 +270,26 @@ export function App() {
     const timer = setInterval(() => pollElaboration(editingId), 1000)
     return () => clearInterval(timer)
   }, [editingId, running, qa?.round, pollElaboration])
+
+  // 映射作业异步执行：running 时每秒轮询直到出结论
+  useEffect(() => {
+    if (editingId === null || !mappingRunning) return
+    const timer = setInterval(() => pollMapping(editingId), 1000)
+    return () => clearInterval(timer)
+  }, [editingId, mappingRunning, pollMapping])
+
+  // 切用例或作业进入成功态时装载结构化步骤；从未触发过映射则清空
+  useEffect(() => {
+    if (editingId === null) {
+      setSteps([])
+      return
+    }
+    if (mapping?.state === 'succeeded') {
+      loadSteps(editingId)
+    } else if (mapping === null) {
+      setSteps([])
+    }
+  }, [editingId, mapping?.state, loadSteps])
 
   function startNew() {
     setSelected(null)
@@ -244,7 +352,7 @@ export function App() {
         return
       }
       if (!r.ok) throw new Error(`HTTP ${r.status}`)
-      return (await r.json()) as TextCase | Elaboration
+      return (await r.json()) as TextCase | Elaboration | MappingJob
     } catch (e) {
       setError(`请求失败：${(e as Error).message}`)
     } finally {
@@ -281,6 +389,16 @@ export function App() {
     if (data && 'status' in data) {
       syncCase(data as TextCase)
       setAnswerDraft({})
+      refreshList()
+    }
+  }
+
+  async function startMapping() {
+    const data = await postAction('map')
+    if (data && selected) {
+      // 202 返回的是映射作业视图（含 state，与扩写视图形状不同，但路径固定）
+      setSelected({ ...selected, mapping: data as MappingJob })
+      setSteps([])
       refreshList()
     }
   }
@@ -432,6 +550,176 @@ export function App() {
     )
   }
 
+  function renderMappingPanel() {
+    if (!selected) return null
+
+    // 还没碰过扩写流程且没有历史作业：不占用界面（纯草稿阶段）
+    if (!qa && !mapping) return null
+
+    if (!mappingGatePassed && !mapping) {
+      return (
+        <div style={{ ...PANEL_STYLE, borderLeftColor: '#94a3b8', opacity: 0.85 }}>
+          <strong>结构化映射</strong>
+          <p style={{ margin: '0.5rem 0', color: '#555' }}>
+            扩写评估通过（或强制跳过）后，可一键把文本步骤映射为操作目录中的结构化步骤。
+          </p>
+        </div>
+      )
+    }
+
+    if (mapping?.state === 'running') {
+      return (
+        <div style={PANEL_STYLE}>
+          <strong>结构化映射进行中…</strong>
+          <p style={{ margin: '0.5rem 0', color: '#666' }}>
+            GLM 正在按操作目录与命令字典映射，服务端会对映射结果做字典二次校验，状态自动刷新。
+          </p>
+        </div>
+      )
+    }
+
+    if (mapping?.state === 'failed') {
+      return (
+        <div style={{ ...PANEL_STYLE, borderColor: '#dc2626' }}>
+          <strong style={{ color: '#b91c1c' }}>
+            {MAPPING_ERROR_LABELS[mapping.error?.code ?? ''] ?? '结构化映射失败'}
+          </strong>
+          {mapping.error?.detail && (
+            <pre
+              style={{
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+                background: '#fef2f2',
+                padding: '0.5rem',
+                fontSize: '0.85rem',
+              }}
+            >
+              {mapping.error.detail}
+            </pre>
+          )}
+          <button onClick={startMapping} disabled={busy || !mappingGatePassed}>
+            {busy ? '提交中…' : '重试映射'}
+          </button>
+        </div>
+      )
+    }
+
+    if (mapping?.state === 'succeeded') {
+      const unmapped = mapping.unmapped_count ?? 0
+      return (
+        <div style={{ ...PANEL_STYLE, borderLeftColor: unmapped > 0 ? '#d97706' : '#16a34a' }}>
+          <strong>结构化映射结果</strong>
+          <p style={{ margin: '0.5rem 0' }}>
+            共 {mapping.step_count ?? 0} 步：
+            <span style={{ color: '#15803d', fontWeight: 600 }}>
+              {' '}
+              已映射 {mapping.mapped_count ?? 0}
+            </span>
+            <span style={{ color: unmapped > 0 ? '#b91c1c' : '#15803d', fontWeight: 600 }}>
+              {' '}
+              · 未映射 {unmapped}
+            </span>
+            {unmapped > 0 && (
+              <span style={{ color: '#b91c1c' }}>（以下红底步骤待人工确认，映射不升级）</span>
+            )}
+          </p>
+
+          {mapping.reclassifications.length > 0 && (
+            <div style={{ marginBottom: '0.75rem' }}>
+              <strong style={{ fontSize: '0.85rem', color: '#b45309' }}>
+                服务端字典对账降级留痕（LLM 自报合法但被服务端拦截）：
+              </strong>
+              <ul style={{ margin: '0.35rem 0', paddingLeft: '1.25rem', fontSize: '0.85rem' }}>
+                {mapping.reclassifications.map((item) => (
+                  <li key={`${item.seq}-${item.code}`} style={{ color: '#92400e' }}>
+                    步骤 {item.seq}：{RECLASSIFY_LABELS[item.code] ?? item.code}
+                    {item.detail ? `（${item.detail}）` : ''}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          <ol style={{ margin: 0, paddingLeft: 0, listStyle: 'none' }}>
+            {steps.map((step) => {
+              const isUnmapped = step.mapping_status === 'unmapped'
+              return (
+                <li
+                  key={step.id}
+                  style={{
+                    border: '1px solid',
+                    borderColor: isUnmapped ? '#fca5a5' : '#cbd5e1',
+                    borderLeft: '4px solid',
+                    borderLeftColor: isUnmapped ? '#dc2626' : '#16a34a',
+                    background: isUnmapped ? '#fef2f2' : '#fff',
+                    borderRadius: '4px',
+                    padding: '0.5rem 0.75rem',
+                    marginBottom: '0.5rem',
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                    <strong>#{step.seq}</strong>
+                    <span
+                      style={{
+                        fontSize: '0.75rem',
+                        borderRadius: '4px',
+                        padding: '0 0.4rem',
+                        color: isUnmapped ? '#b91c1c' : '#15803d',
+                        background: isUnmapped ? '#fee2e2' : '#dcfce7',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {isUnmapped ? '未映射 · 待确认' : '已映射'}
+                    </span>
+                    {!isUnmapped && step.aw_operation_id !== null && (
+                      <span style={{ fontSize: '0.8rem', color: '#666' }}>
+                        操作目录 ID：{step.aw_operation_id}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ marginTop: '0.25rem' }}>{step.action_text}</div>
+                  <div style={{ fontSize: '0.85rem', color: '#444', marginTop: '0.25rem' }}>
+                    参数：
+                    {Object.keys(step.params).length > 0 ? (
+                      <code style={{ fontSize: '0.8rem' }}>{JSON.stringify(step.params)}</code>
+                    ) : (
+                      <span>无</span>
+                    )}
+                  </div>
+                  {step.assertion_text && (
+                    <div style={{ fontSize: '0.85rem', color: '#444', marginTop: '0.25rem' }}>
+                      断言：{step.assertion_text}
+                    </div>
+                  )}
+                </li>
+              )
+            })}
+          </ol>
+
+          {mappingGatePassed && (
+            <button onClick={startMapping} disabled={busy} style={{ marginTop: '0.25rem' }}>
+              {busy ? '提交中…' : '重新映射'}
+            </button>
+          )}
+        </div>
+      )
+    }
+
+    // 闸门通过且从未触发
+    return (
+      <div style={{ ...PANEL_STYLE, borderLeftColor: '#7c3aed' }}>
+        <strong>结构化映射</strong>
+        <p style={{ margin: '0.5rem 0', color: '#444' }}>
+          由 GLM 按操作目录（含设备目标/操作类型）与命令字典映射为结构化步骤；
+          mml_generic 命令落库前经服务端命令字典二次校验，未命中或参数非法的步骤会标为未映射。
+        </p>
+        <button onClick={startMapping} disabled={busy}>
+          {busy ? '提交中…' : '一键映射为结构化步骤'}
+        </button>
+      </div>
+    )
+  }
+
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', padding: '2rem', maxWidth: '72rem' }}>
       <h1>Wireless Test System</h1>
@@ -512,6 +800,7 @@ export function App() {
           </div>
 
           {selected && <div style={{ marginTop: '1rem' }}>{renderElaborationPanel()}</div>}
+          {selected && <div style={{ marginTop: '1rem' }}>{renderMappingPanel()}</div>}
         </section>
       </section>
     </main>

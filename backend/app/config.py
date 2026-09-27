@@ -15,10 +15,11 @@ class Settings(BaseSettings):
     # 操作目录文件所在目录（需含 operations.json）；生产由 AW 团队供给路径
     catalog_dir: str = _DEFAULT_CATALOG_DIR
 
-    # GLM CLI 接入（ADR-0006）：可执行文件路径、扩写 skill、单次调用超时秒数。
+    # GLM CLI 接入（ADR-0006）：可执行文件路径、skill、单次调用超时秒数。
     # 本地 GLM 5.2 仅提供 CLI；延迟不可控，故调用全部异步化、超时即任务失败。
     glm_cli_path: str = "glm-cli"
     glm_elaboration_skill: str = "elaboration-skill"
+    glm_mapping_skill: str = "mapping-skill"
     glm_timeout_seconds: float = 60.0
 
 

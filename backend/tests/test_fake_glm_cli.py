@@ -57,6 +57,94 @@ def test_mapping_mode_writes_steps_result(tmp_path):
     assert step["mapping_status"] == "unmapped"
 
 
+def _mapping_workdir(tmp_path: Path, catalog_subset: list) -> Path:
+    wd = _prepare_workdir(tmp_path, {"properties": {"steps": {}}})
+    (wd / "catalog_subset.json").write_text(
+        json.dumps(catalog_subset), encoding="utf-8"
+    )
+    return wd
+
+
+_DEMO_SUBSET = [
+    {"id": 1, "name": "act_cell", "kind": "mml_family", "device_target": "bbu"},
+    {
+        "id": 2,
+        "name": "run_mml",
+        "kind": "mml_generic",
+        "device_target": "bbu",
+        "dictionary_ref": "bbu-mml-dict",
+        "dictionary_version": "demo-bbu-v1.2",
+        "commands": [{"command": "DSP_CELL", "params": [{"name": "cell_id", "type": "int"}]}],
+    },
+]
+
+
+def test_mapping_matched_scenario_uses_injected_candidate_ids(monkeypatch, tmp_path):
+    """字典命中夹具：真实阅读 catalog_subset，按操作名取注入 ID 产出 mapped 步骤。"""
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "matched")
+    wd = _mapping_workdir(tmp_path, _DEMO_SUBSET)
+    proc = _run(wd, "mapping-skill")
+    assert proc.returncode == 0, proc.stderr
+
+    result = json.loads((wd / "result.json").read_text(encoding="utf-8"))
+    steps = result["steps"]
+    assert [s["mapping_status"] for s in steps] == ["mapped", "mapped"]
+    assert steps[0]["aw_operation_id"] == 1
+    assert steps[1]["aw_operation_id"] == 2
+    assert steps[1]["params"] == {"command": "DSP_CELL", "args": {"cell_id": 1}}
+
+
+def test_mapping_intercepted_scenario_emits_command_unknown_to_dictionary(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "intercepted")
+    wd = _mapping_workdir(tmp_path, _DEMO_SUBSET)
+    proc = _run(wd, "mapping-skill")
+    assert proc.returncode == 0, proc.stderr
+
+    generic_step = json.loads((wd / "result.json").read_text(encoding="utf-8"))["steps"][1]
+    assert generic_step["mapping_status"] == "mapped"  # LLM 自报合法
+    assert generic_step["params"]["command"] == "LST_BOGUS"  # 字典不认，待服务端拦截
+
+
+def test_mapping_rejects_subset_entry_missing_kind(monkeypatch, tmp_path):
+    """注入契约守护：候选条目不带 kind/device_target 时夹具拒绝产出。"""
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "matched")
+    bad_subset = [{"id": 1, "name": "act_cell", "device_target": "bbu"}]
+    wd = _mapping_workdir(tmp_path, bad_subset)
+    proc = _run(wd, "mapping-skill")
+    assert proc.returncode != 0
+    assert "kind" in proc.stderr
+    assert not (wd / "result.json").exists()
+
+
+def test_mapping_rejects_generic_entry_without_commands_fragment(
+    monkeypatch, tmp_path
+):
+    """mml_generic 候选必须挂命令字典片段（即使字典缺失也是空列表，不能缺字段）。"""
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "matched")
+    bad_subset = [
+        {"id": 2, "name": "run_mml", "kind": "mml_generic", "device_target": "bbu"}
+    ]
+    wd = _mapping_workdir(tmp_path, bad_subset)
+    proc = _run(wd, "mapping-skill")
+    assert proc.returncode != 0
+    assert "commands" in proc.stderr
+
+
+def test_mapping_fault_scenarios(monkeypatch, tmp_path):
+    wd = _mapping_workdir(tmp_path, _DEMO_SUBSET)
+
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "fail")
+    assert _run(wd, "mapping-skill").returncode != 0
+    assert not (wd / "result.json").exists()
+
+    monkeypatch.setenv("FAKE_GLM_MAPPING", "malformed")
+    assert _run(wd, "mapping-skill").returncode == 0
+    with pytest.raises(json.JSONDecodeError):
+        json.loads((wd / "result.json").read_text(encoding="utf-8"))
+
+
 def test_missing_input_md_fails(tmp_path):
     wd = tmp_path / "bad-job"
     wd.mkdir()

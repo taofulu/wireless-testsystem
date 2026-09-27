@@ -10,6 +10,7 @@ from app.models.catalog import (  # noqa: F401
     Operation,
     Scenario,
 )
+from app.models.mapping import MappingStatus, StructuredStep  # noqa: F401
 from app.models.text_case import TextCase, TextCaseStatus  # noqa: F401
 
 __all__ = [
@@ -20,4 +21,6 @@ __all__ = [
     "DictionaryState",
     "CommandDictionaryEntry",
     "Scenario",
+    "StructuredStep",
+    "MappingStatus",
 ]

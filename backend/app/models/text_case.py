@@ -44,6 +44,10 @@ class TextCase(Base):
     # 扩写问答状态（spec 数据模型 elaboration_qa jsonb）：None 表示从未触发。
     # 结构见 app.elaboration（_new_qa）与 schemas.ElaborationOut。
     elaboration_qa: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # 映射作业状态（T5）：None 表示从未触发映射。8 态状态机不新增"映射中"
+    # 状态——running 期间用例停留在 elaborating/mapped，作业细粒度状态存于此
+    # （running/succeeded/failed），结构见 app.mapping 与 schemas.MappingJobOut。
+    mapping_job: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -54,3 +58,8 @@ class TextCase(Base):
     def elaboration(self) -> Optional[dict]:
         """对外视图字段（TextCaseOut.elaboration）直接取 elaboration_qa。"""
         return self.elaboration_qa
+
+    @property
+    def mapping(self) -> Optional[dict]:
+        """对外视图字段（TextCaseOut.mapping）直接取 mapping_job。"""
+        return self.mapping_job

@@ -12,26 +12,23 @@
 POST /map 校验。
 """
 import json
-import os
 import shutil
-import signal
 import subprocess
-import sys
 import tempfile
 import threading
-import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm.exc import StaleDataError
 
+from app import glm_cli
 from app.config import settings
 from app.db import SessionLocal
+from app.glm_cli import CLIJobError
 from app.models import TextCase, TextCaseStatus
 from app.schemas import ElaborationAnswersIn, ElaborationCLIResult
 
@@ -266,6 +263,13 @@ def apply_text_case_patch(case: TextCase, updates: dict) -> None:
     if qa is not None and qa["state"] == "running":
         raise ElaborationConflict("扩写评估正在进行中，请等待结束后再编辑")
 
+    # 映射作业进行中同样禁止改评估输入：注入文本与结论会脱节（函数内延迟
+    # 导入，避免 elaboration ↔ mapping 模块级循环依赖）
+    from app import mapping as mapping_module
+
+    if mapping_module.is_mapping_running(case):
+        raise ElaborationConflict("映射正在进行中，请等待结束后再编辑")
+
     changed_fields = [
         field
         for field in _GATE_INPUT_FIELDS
@@ -307,21 +311,6 @@ def _inject_workdir(case: TextCase, workdir: Path) -> None:
     )
 
 
-def _build_command(workdir: Path) -> list[str]:
-    cli_path = settings.glm_cli_path
-    args = [
-        cli_path,
-        "--skill",
-        settings.glm_elaboration_skill,
-        "--workdir",
-        str(workdir),
-    ]
-    # 无执行位的 .py 夹具/包装脚本以当前解释器运行；真实 glm-cli 直接 exec。
-    if cli_path.endswith(".py"):
-        return [sys.executable, *args]
-    return args
-
-
 def _mark_failed(db: Session, case: TextCase, code: str, detail: str) -> bool:
     """落明确失败态：清空追问，绝不产生脏数据。返回是否落库成功。"""
     qa = case.elaboration_qa
@@ -329,83 +318,6 @@ def _mark_failed(db: Session, case: TextCase, code: str, detail: str) -> bool:
     qa["missing_points"] = []
     qa["error"] = {"code": code, "detail": detail[:1000]}
     return _commit_qa(db, case)
-
-
-class _CLIJobError(Exception):
-    """子进程作业失败；code 落 elaboration_qa.error.code。"""
-
-    def __init__(self, code: str, detail: str):
-        super().__init__(detail)
-        self.code = code
-        self.detail = detail
-
-
-def _terminate(proc: subprocess.Popen) -> None:
-    """回收 CLI：新会话/进程组 leader 时整组杀掉（连同 CLI 的 agent 孙进程），
-
-    先 SIGTERM 再 SIGKILL；并发双回收（作业线程 + shutdown）安全幂等。
-    """
-    if proc.poll() is not None:
-        return
-
-    def _send(sig: int) -> None:
-        try:
-            os.killpg(os.getpgid(proc.pid), sig)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.send_signal(sig)
-            except ProcessLookupError:
-                pass
-
-    _send(signal.SIGTERM)
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        _send(signal.SIGKILL)
-        proc.wait()
-
-
-def _await_result_file(
-    proc: subprocess.Popen, result_path: Path, timeout: float
-) -> ElaborationCLIResult:
-    """按 ADR-0006 轮询 result.json 存在性直至完成；到点不产出即超时。
-
-    result.json 一旦可解析即视为作业完成——CLI 写完结果仍挂起时不再死等
-    进程退出，而是回收进程后直接消费结果。
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        if result_path.exists():
-            try:
-                raw = json.loads(result_path.read_text(encoding="utf-8"))
-                parsed = ElaborationCLIResult.model_validate(raw)
-            except (json.JSONDecodeError, ValidationError):
-                # 可能是写了一半：进程仍存活且未超时则继续轮询；仍存活但到点
-                # 判超时；进程已结束则落到下方退出码/坏结果分支分类
-                if proc.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                    continue
-                if proc.poll() is None:
-                    _terminate(proc)
-                    raise _CLIJobError(
-                        "timeout", f"GLM CLI {timeout}s 内未产出合法 result.json"
-                    )
-            else:
-                if proc.poll() is None:
-                    _terminate(proc)
-                return parsed
-
-        returncode = proc.poll()
-        if returncode is not None:
-            break
-        if time.monotonic() >= deadline:
-            _terminate(proc)
-            raise _CLIJobError("timeout", f"GLM CLI 超过 {timeout}s 未产出 result.json")
-        time.sleep(0.05)
-
-    if returncode != 0:
-        raise _CLIJobError("cli_failed", f"GLM CLI 非零退出（{returncode}）")
-    raise _CLIJobError("bad_result", "CLI 已退出但 result.json 缺失或不符合输出 schema")
 
 
 def _run_elaboration_job(case_id: int, token: str) -> None:
@@ -429,7 +341,9 @@ def _run_elaboration_job(case_id: int, token: str) -> None:
             # start_new_session：CLI 自成进程组 leader，回收时可连同其派生的
             # agent 孙进程一起 killpg（ADR-0006：CLI 内部自主跑 agent 循环）
             proc = subprocess.Popen(
-                _build_command(workdir),
+                glm_cli.build_command(
+                    settings.glm_cli_path, settings.glm_elaboration_skill, workdir
+                ),
                 cwd=workdir,
                 stdout=stdout_f,
                 stderr=stderr_f,
@@ -443,10 +357,13 @@ def _run_elaboration_job(case_id: int, token: str) -> None:
             _active_procs[token] = proc
 
         try:
-            parsed = _await_result_file(
-                proc, workdir / "result.json", settings.glm_timeout_seconds
+            parsed = glm_cli.await_result_file(
+                proc,
+                workdir / "result.json",
+                settings.glm_timeout_seconds,
+                ElaborationCLIResult,
             )
-        except _CLIJobError as exc:
+        except CLIJobError as exc:
             detail = exc.detail
             if exc.code == "cli_failed":
                 stderr_f.flush()
@@ -523,5 +440,4 @@ def shutdown_active_jobs() -> None:
         procs = list(_active_procs.values())
         _active_procs.clear()
     for proc in procs:
-        if proc.poll() is None:
-            _terminate(proc)
+        glm_cli.terminate_proc(proc)

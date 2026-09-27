@@ -5,33 +5,43 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.db import SessionLocal
-from app.routers import catalog, elaboration, text_cases
+from app.routers import catalog, elaboration, mapping, text_cases
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """启动：加载操作目录（AW 团队机器可读供给；非法条目拒绝启动）并回收上次
-    进程残留的在途扩写作业；关闭：整组杀掉在途 GLM CLI，不留孤儿子进程。
+    进程残留的在途扩写/映射作业；关闭：整组杀掉在途 GLM CLI，不留孤儿子进程。
     """
     from app.catalog import import_operations_from_dir
-    from app.elaboration import reap_interrupted_jobs, shutdown_active_jobs
+    from app.elaboration import (
+        reap_interrupted_jobs as reap_elaboration,
+        shutdown_active_jobs as shutdown_elaboration,
+    )
+    from app.mapping import (
+        reap_interrupted_jobs as reap_mapping,
+        shutdown_active_jobs as shutdown_mapping,
+    )
 
     db = SessionLocal()
     try:
         import_operations_from_dir(db, settings.catalog_dir)
-        reap_interrupted_jobs(db)
+        reap_elaboration(db)
+        reap_mapping(db)
     finally:
         db.close()
     try:
         yield
     finally:
-        shutdown_active_jobs()
+        shutdown_elaboration()
+        shutdown_mapping()
 
 
 app = FastAPI(title="Wireless Test System", version="0.1.0", lifespan=lifespan)
 
 app.include_router(text_cases.router)
 app.include_router(elaboration.router)
+app.include_router(mapping.router)
 app.include_router(catalog.router)
 
 
