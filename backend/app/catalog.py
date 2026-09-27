@@ -127,6 +127,17 @@ def operation_to_out(op: Operation) -> dict[str, Any]:
     return out
 
 
+def required_fields(params_schema: dict) -> list[str]:
+    """从操作目录条目的 params_schema 提取必填字段列表。
+
+    确认态参数校验与生成期渲染输入共用同一提取规则，避免两处漂移。
+    """
+    required = params_schema.get("required")
+    if isinstance(required, list):
+        return [str(f) for f in required]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # 命令字典
 # ---------------------------------------------------------------------------

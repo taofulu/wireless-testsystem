@@ -236,6 +236,28 @@ class ConfirmationOut(BaseModel):
     manual_count: int
 
 
+# ---------------------------------------------------------------------------
+# 生成域（T7）：可执行用例版本、只读代码查看
+# ---------------------------------------------------------------------------
+
+
+class ExecutableCaseOut(BaseModel):
+    """可执行用例版本视图（版本历史列表用；代码全文经 /code 获取）。"""
+
+    id: int
+    text_case_id: int
+    version: int
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutableCodeOut(ExecutableCaseOut):
+    """代码全文视图（故事 13 只读查看）。"""
+
+    code: str
+
+
 class TextCaseOut(BaseModel):
     """文本用例对外视图（追溯/拓扑字段后续票补充）。"""
 

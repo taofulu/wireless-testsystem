@@ -17,7 +17,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.catalog import MMLCheck, check_generic_mml, operation_to_out
+from app.catalog import MMLCheck, check_generic_mml, operation_to_out, required_fields
 from app.models import TextCase, TextCaseStatus
 from app.models.catalog import Operation, Scenario
 from app.models.mapping import MappingStatus, StructuredStep
@@ -43,14 +43,6 @@ class StepEditError(Exception):
 # ---------------------------------------------------------------------------
 
 
-def _required_fields(params_schema: dict[str, Any]) -> list[str]:
-    """从操作目录条目的 params_schema 提取必填字段列表。"""
-    required = params_schema.get("required")
-    if isinstance(required, list):
-        return [str(f) for f in required]
-    return []
-
-
 def _validate_required_params(
     op: Operation, params: dict[str, Any]
 ) -> Optional[StepEditError]:
@@ -59,7 +51,7 @@ def _validate_required_params(
     不做完整 JSON Schema 校验（MVP 无 jsonschema 依赖）；必填字段是最低
     保障，类型/范围等由 mml_generic 字典校验与沙盒/真实执行期进一步拦截。
     """
-    missing = [f for f in _required_fields(op.params_schema) if f not in params]
+    missing = [f for f in required_fields(op.params_schema) if f not in params]
     if missing:
         return StepEditError(
             0,

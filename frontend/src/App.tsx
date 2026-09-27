@@ -99,6 +99,17 @@ interface Scenario {
   has_meta: boolean
 }
 
+interface ExecutableCase {
+  id: number
+  text_case_id: number
+  version: number
+  created_at: string
+}
+
+interface ExecutableCode extends ExecutableCase {
+  code: string
+}
+
 interface StepDraft {
   id: number
   seq: number
@@ -139,6 +150,7 @@ const STATUS_LABELS: Record<string, string> = {
   elaborating: '扩写中',
   mapped: '已映射·待确认',
   confirmed: '已确认',
+  generated: '已生成',
 }
 
 const ERROR_LABELS: Record<string, string> = {
@@ -231,6 +243,9 @@ export function App() {
   const [scenarios, setScenarios] = useState<Scenario[]>([])
   const [savingSteps, setSavingSteps] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  const [execCases, setExecCases] = useState<ExecutableCase[]>([])
+  const [execCode, setExecCode] = useState<ExecutableCode | null>(null)
+  const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const editingId = selected?.id ?? null
@@ -301,6 +316,14 @@ export function App() {
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: Scenario[]) => setScenarios(data))
       .catch(() => setScenarios([]))
+  }, [])
+
+  // 可执行用例版本历史（新版本在前）；渲染失败/网络失败静默，保留旧列表
+  const loadExecCases = useCallback((id: number) => {
+    fetch(`/api/text-cases/${id}/executable-cases`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: ExecutableCase[]) => setExecCases(data))
+      .catch(() => setExecCases([]))
   }, [])
 
   function buildDrafts(list: StructuredStep[]): StepDraft[] {
@@ -417,6 +440,43 @@ export function App() {
     }
   }
 
+  async function generateCase() {
+    if (editingId === null) return
+    setGenerating(true)
+    setError(null)
+    try {
+      const r = await fetch(`/api/text-cases/${editingId}/generate`, { method: 'POST' })
+      if (!r.ok) {
+        const detail = (await r.json().catch(() => ({}))) as { detail?: unknown }
+        const msg =
+          typeof detail.detail === 'object' && detail.detail !== null
+            ? `渲染失败：${(detail.detail as { detail?: string }).detail ?? ''}`
+            : typeof detail.detail === 'string'
+              ? detail.detail
+              : `HTTP ${r.status}`
+        throw new Error(msg)
+      }
+      loadExecCases(editingId)
+      refreshSelected(editingId)
+      refreshList()
+    } catch (e) {
+      setError(`生成失败：${(e as Error).message}`)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  async function viewCode(execId: number) {
+    setError(null)
+    try {
+      const r = await fetch(`/api/executable-cases/${execId}/code`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      setExecCode((await r.json()) as ExecutableCode)
+    } catch (e) {
+      setError(`读取代码失败：${(e as Error).message}`)
+    }
+  }
+
   // 映射作业轮询：只取轻量作业视图；到终态后拉步骤并刷新列表（状态变为已映射）
   const pollMapping = useCallback(
     (id: number) => {
@@ -499,6 +559,21 @@ export function App() {
       loadScenarios()
     }
   }, [selected?.status, loadOperations, loadScenarios])
+
+  // 进入 confirmed/generated 态时装载版本历史；离开时清空代码视图
+  useEffect(() => {
+    if (editingId === null) {
+      setExecCases([])
+      setExecCode(null)
+      return
+    }
+    if (selected?.status === 'confirmed' || selected?.status === 'generated') {
+      loadExecCases(editingId)
+    } else {
+      setExecCases([])
+      setExecCode(null)
+    }
+  }, [editingId, selected?.status, loadExecCases])
 
   function startNew() {
     setSelected(null)
@@ -1167,6 +1242,88 @@ export function App() {
     )
   }
 
+  function renderGenerationPanel() {
+    if (!selected) return null
+    if (selected.status !== 'confirmed' && selected.status !== 'generated') return null
+
+    return (
+      <div style={{ ...PANEL_STYLE, borderLeftColor: '#0e7490' }}>
+        <strong>可执行用例：模板渲染（只读）</strong>
+        {selected.status === 'confirmed' && (
+          <p style={{ margin: '0.5rem 0', color: '#444' }}>
+            确认后的结构化步骤将由模板渲染为带 Allure 步骤标记的 pytest 代码（ADR-0001：
+            LLM 不直接产出代码）；每次生成追加新版本，历史版本保留可回溯。
+          </p>
+        )}
+        {selected.status === 'generated' && (
+          <p style={{ margin: '0.5rem 0', color: '#444' }}>
+            代码 100% 由模板渲染产出，全文只读——如需修改请回上游改文本/映射后重新生成新版本。
+          </p>
+        )}
+
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button onClick={generateCase} disabled={generating}>
+            {generating ? '生成中…' : execCases.length > 0 ? '重新生成新版本' : '生成可执行用例'}
+          </button>
+          {execCases.length > 0 && (
+            <span style={{ fontSize: '0.85rem', color: '#666' }}>
+              共 {execCases.length} 个版本
+            </span>
+          )}
+        </div>
+
+        {execCases.length > 0 && (
+          <ul style={{ listStyle: 'none', padding: 0, margin: '0.75rem 0 0' }}>
+            {execCases.map((ec) => (
+              <li
+                key={ec.id}
+                style={{
+                  display: 'flex',
+                  gap: '0.75rem',
+                  alignItems: 'center',
+                  padding: '0.35rem 0.5rem',
+                  borderBottom: '1px solid #e2e8f0',
+                  background: execCode?.id === ec.id ? '#ecfeff' : 'transparent',
+                }}
+              >
+                <strong style={{ flexShrink: 0 }}>版本 {ec.version}</strong>
+                <span style={{ fontSize: '0.8rem', color: '#666', flex: 1 }}>
+                  {new Date(ec.created_at).toLocaleString()}
+                </span>
+                <button onClick={() => viewCode(ec.id)} style={{ fontSize: '0.8rem' }}>
+                  {execCode?.id === ec.id ? '查看中' : '查看代码'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {execCode && (
+          <div style={{ marginTop: '0.75rem' }}>
+            <div style={{ fontSize: '0.8rem', color: '#0e7490', marginBottom: '0.25rem' }}>
+              版本 {execCode.version} 代码全文（只读，系统不提供在线编辑入口）
+            </div>
+            <pre
+              style={{
+                background: '#0f172a',
+                color: '#e2e8f0',
+                padding: '0.75rem',
+                borderRadius: '6px',
+                fontSize: '0.78rem',
+                lineHeight: 1.5,
+                overflow: 'auto',
+                maxHeight: '32rem',
+                userSelect: 'text',
+              }}
+            >
+              <code>{execCode.code}</code>
+            </pre>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <main style={{ fontFamily: 'system-ui, sans-serif', padding: '2rem', maxWidth: '72rem' }}>
       <h1>Wireless Test System</h1>
@@ -1249,6 +1406,7 @@ export function App() {
           {selected && <div style={{ marginTop: '1rem' }}>{renderElaborationPanel()}</div>}
           {selected && <div style={{ marginTop: '1rem' }}>{renderMappingPanel()}</div>}
           {selected && <div style={{ marginTop: '1rem' }}>{renderConfirmationPanel()}</div>}
+          {selected && <div style={{ marginTop: '1rem' }}>{renderGenerationPanel()}</div>}
         </section>
       </section>
     </main>

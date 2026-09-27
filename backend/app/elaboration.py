@@ -257,6 +257,9 @@ def apply_text_case_patch(case: TextCase, updates: dict) -> None:
     - awaiting_answers：旧追问针对旧文本 → 作废本轮追问，回 answered 重评
     - sufficient/skipped：闸门结论失效 → 回 answered，须重新扩写或再次跳过
       （ADR-0007：不允许让未评估文本流入映射）
+    - mapped/confirmed/generated：评估输入变化同时使下游产物（结构化步骤/
+      确认/已生成代码的渲染依据）失去基础 → 用例回退 elaborating，重走
+      扩写→映射→确认→生成（T7 故事 14/15：改文本重新映射产生新版本）
     仅"字段出现"不算变化，新值与现值相同（含空 PATCH）不动闸门。
     """
     qa = case.elaboration_qa
@@ -287,6 +290,15 @@ def apply_text_case_patch(case: TextCase, updates: dict) -> None:
         qa["missing_points"] = []
         qa["error"] = None
         flag_modified(case, "elaboration_qa")
+
+    if changed_fields and case.status in (
+        TextCaseStatus.MAPPED,
+        TextCaseStatus.CONFIRMED,
+        TextCaseStatus.GENERATED,
+    ):
+        # 旧结构化步骤保留作历史参照（重新映射成功后整批替换），但状态回退
+        # 使确认/编辑/生成闸门全部失效——下游必须基于新文本重走管线
+        case.status = TextCaseStatus.ELABORATING
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,14 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.db import SessionLocal
-from app.routers import catalog, confirmation, elaboration, mapping, text_cases
+from app.routers import (
+    catalog,
+    confirmation,
+    elaboration,
+    generation,
+    mapping,
+    text_cases,
+)
 
 
 @asynccontextmanager
@@ -43,6 +50,7 @@ app.include_router(text_cases.router)
 app.include_router(elaboration.router)
 app.include_router(mapping.router)
 app.include_router(confirmation.router)
+app.include_router(generation.router)
 app.include_router(catalog.router)
 
 
