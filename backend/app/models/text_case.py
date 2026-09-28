@@ -29,6 +29,20 @@ class TextCaseStatus(str, enum.Enum):
     DONE = "done"
 
 
+class TextCaseOrigin(str, enum.Enum):
+    """用例血缘来源（ADR-0008；T14 参数化进化）。
+
+    - SEED：经手工认证标记为种子，作为进化基准模板
+    - EVOLVED：经 POST /text-cases/{id}/evolve 由种子槽位赋值复制产生，
+      parent_case_id 指向种子，绕过扩写+映射（零 LLM 成本）
+    非 enum 值（DB 列 nullable）默认为 null——手写用例未标记种子时无血缘，
+      追溯视图种子/进化两环为空（故事 34）。
+    """
+
+    SEED = "seed"
+    EVOLVED = "evolved"
+
+
 class TextCase(Base):
     __tablename__ = "text_case"
 
@@ -52,12 +66,21 @@ class TextCase(Base):
     # BBU/UE/仪表组合声明，execute/recheck 时作为 LASS 三值校验输入；
     # None 表示未声明（LASS 按空拓扑校验）
     required_topology: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    # 五环追溯锚点（T13，故事 34）：进化用例指向其种子用例；非进化路径
-    # （手写用例）为 null——此时追溯视图种子/进化两环为空。T14 进化链路
-    # 落地时由创建进化用例的路径填入。
+    # 五环追溯锚点（T13，故事 34；T14 落地）：进化用例指向其种子用例的外键；
+    # 非进化路径（手写用例）为 null——此时追溯视图种子/进化两环为空。
+    # 进化路径在 POST /text-cases/{id}/evolve 创建新用例时填入。
     parent_case_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("text_case.id"), nullable=True
     )
+    # 血缘来源（ADR-0008；T14）：seed=种子（手工认证），evolved=由种子进化
+    # 产生。null 表示手写用例未标记种子，无血缘。
+    origin: Mapped[Optional[TextCaseOrigin]] = mapped_column(
+        String(10), nullable=True
+    )
+    # 可变参数槽位定义（ADR-0008；T14 故事 23）：仅在 origin=seed 时有意义，
+    # 形如 {"freq_band": "频段", "power": "功率dBm"}。进化时按槽位名提供值，
+    # 复制种子的结构化步骤并把 params/text 中的 {{slot_name}} 占位符替换。
+    variable_slots: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

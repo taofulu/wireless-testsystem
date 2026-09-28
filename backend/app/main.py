@@ -9,6 +9,7 @@ from app.routers import (
     catalog,
     confirmation,
     elaboration,
+    evolution,
     execution,
     generation,
     mapping,
@@ -58,6 +59,7 @@ app.include_router(catalog.router)
 app.include_router(execution.router)
 app.include_router(reporting.router)
 app.include_router(worker.router)
+app.include_router(evolution.router)
 
 
 @app.get("/health")

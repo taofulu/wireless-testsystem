@@ -18,12 +18,17 @@ from app.models.execution import (  # noqa: F401
     Worker,
 )
 from app.models.mapping import MappingStatus, StructuredStep  # noqa: F401
-from app.models.text_case import TextCase, TextCaseStatus  # noqa: F401
+from app.models.text_case import (  # noqa: F401
+    TextCase,
+    TextCaseOrigin,
+    TextCaseStatus,
+)
 
 __all__ = [
     "Base",
     "TextCase",
     "TextCaseStatus",
+    "TextCaseOrigin",
     "Operation",
     "DictionaryState",
     "CommandDictionaryEntry",

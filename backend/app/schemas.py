@@ -267,7 +267,12 @@ class ExecutableCodeOut(ExecutableCaseOut):
 
 
 class TextCaseOut(BaseModel):
-    """文本用例对外视图（追溯字段后续票补充）。"""
+    """文本用例对外视图。
+
+    origin/variable_slots/parent_case_id 三字段承载 T14 参数化进化血缘
+    （ADR-0008）：origin=seed 是手工认证的种子，origin=evolved 由种子进化
+    产生、parent_case_id 指向种子；非进化路径下三者均为 None。
+    """
 
     id: int
     title: str
@@ -278,9 +283,48 @@ class TextCaseOut(BaseModel):
     required_topology: Optional[dict[str, Any]] = None
     elaboration: Optional[ElaborationOut] = None
     mapping: Optional[MappingJobOut] = None
+    origin: Optional[str] = None
+    variable_slots: Optional[dict[str, str]] = None
+    parent_case_id: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# 进化域（T14）：种子认证、参数槽位、用例进化（ADR-0008，故事 23–27）
+# ---------------------------------------------------------------------------
+
+# 用例血缘来源（与 TextCaseOrigin 同源；Literal 让非法取值在 422 被拦）
+TextCaseOriginValue = Literal["seed", "evolved"]
+
+
+class MarkSeedIn(BaseModel):
+    """标记用例为种子（MVP 手工认证，spec Further Notes 故事 23）并声明
+    可变参数槽位定义（频段/功率/UE 数等）。
+
+    槽位定义为 名称→描述 的映射；进化时按槽位名提供值，缺一不可。重提交
+    时整体替换槽位定义（不增量合并），允许调整槽位集。允许空字典——某些
+    种子参数化分量为零（如全静态用例），仍可作进化基准，slot_values 须为空。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    variable_slots: dict[str, str] = Field(default_factory=dict)
+
+
+class EvolveIn(BaseModel):
+    """进化用例：按槽位名提供值（故事 24）。
+
+    slot_values 必须覆盖种子声明的全部槽位（多出/缺失一律 422 拒绝，
+    不允许部分进化）；后端复制种子的结构化步骤与文本并把
+    ``{{slot_name}}`` 占位符替换为值。进化过程零 LLM 成本、确定性可复现
+    （ADR-0008：不重新走扩写+映射）。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    slot_values: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
