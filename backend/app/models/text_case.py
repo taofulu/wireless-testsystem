@@ -10,7 +10,7 @@ import enum
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -52,6 +52,12 @@ class TextCase(Base):
     # BBU/UE/仪表组合声明，execute/recheck 时作为 LASS 三值校验输入；
     # None 表示未声明（LASS 按空拓扑校验）
     required_topology: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # 五环追溯锚点（T13，故事 34）：进化用例指向其种子用例；非进化路径
+    # （手写用例）为 null——此时追溯视图种子/进化两环为空。T14 进化链路
+    # 落地时由创建进化用例的路径填入。
+    parent_case_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("text_case.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

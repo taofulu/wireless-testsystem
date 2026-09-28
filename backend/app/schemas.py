@@ -686,3 +686,97 @@ class ExecuteIn(BaseModel):
     model_config = {"extra": "forbid"}
 
     confirm_inconclusive: bool = False
+
+
+# ---------------------------------------------------------------------------
+# 报告与追溯域（T13）：步骤级报告、五环追溯、flaky 识别（故事 33/34/37/47）
+# ---------------------------------------------------------------------------
+
+
+class AllureStepOut(BaseModel):
+    """Allure 单步映射回原始文本步骤序号的视图（故事 33）。
+
+    seq 为 None 表示该 Allure 步骤不对应原始文本步骤（setup/teardown 附属步骤），
+    仍展示但不参与步骤级失败定位。action_text 由结构化步骤按 seq 回填。
+    """
+
+    seq: Optional[int] = None
+    title: str
+    status: str
+    action_text: Optional[str] = None
+
+
+class StepReportOut(BaseModel):
+    """步骤级报告视图（故事 33/47）。
+
+    real 任务：steps 为 Allure 解析结果，映射回原始文本步骤序号。
+    sandbox 任务：steps 取调试会话 step_results（仿真标注），并携带
+    environment_disclaimer（ADR-0009：显著区分于真实执行报告，不被误用为
+    环境可用性证据）。is_sandbox 供前端视觉分流。
+    """
+
+    task_id: int
+    execution_target: str
+    is_sandbox: bool
+    verdict: str
+    # 仅沙盒任务携带固定声明；real 任务为 None（与沙盒报告显著区分，故事 47）
+    environment_disclaimer: Optional[str] = None
+    steps: list[AllureStepOut] = Field(default_factory=list)
+    logs: str = ""
+    artifacts: list[Any] = Field(default_factory=list)
+    sim_package_version: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class FlakySummaryOut(BaseModel):
+    """同一用例多次真实执行的 flaky 识别（故事 37）。
+
+    is_flaky：≥2 次执行且同时出现 passed 与 failed（断言失败）——同代码版本
+    不同轮次结果不一致即代码 flaky。env_failed 是环境类失败（故事 53），不计为
+    flaky（环境不稳 ≠ 代码 flaky）。仅统计真实执行，沙盒调试会话不计入。
+    """
+
+    total_runs: int
+    passed_count: int
+    failed_count: int
+    is_flaky: bool
+
+
+class ExecutionRingOut(BaseModel):
+    """五环追溯的"执行结果"环：真实执行历史 + flaky 识别（故事 34/37）。
+
+    仅统计真实执行（spec：沙盒调试会话不进五环追溯）。records 新的在前。
+    """
+
+    records: list[ExecutionRecordOut]
+    flaky: FlakySummaryOut
+
+
+class TextCaseSummaryOut(BaseModel):
+    """追溯链中用例环节的摘要视图（种子/进化环）。
+
+    非进化路径下种子/进化环为空（parent_case_id 为 null，故事 34）。
+    """
+
+    id: int
+    title: str
+    status: str
+    parent_case_id: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
+class TraceChainOut(BaseModel):
+    """五环追溯视图（故事 34）：种子→进化→结构化→代码→结果，双向回查。
+
+    非进化路径下 seed_case/evolution_case 为 None（parent_case_id 为 null）；
+    进化路径（T14 落地后）seed_case 为父用例、evolution_case 为当前用例本身。
+    executions 环仅含真实执行（沙盒调试会话不进追溯链，ADR-0009）。
+    """
+
+    executable_case_id: int
+    seed_case: Optional[TextCaseSummaryOut] = None
+    evolution_case: Optional[TextCaseSummaryOut] = None
+    structured_steps: list[StructuredStepOut] = Field(default_factory=list)
+    executable_case: ExecutableCaseOut
+    executions: ExecutionRingOut

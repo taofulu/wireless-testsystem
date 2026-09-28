@@ -12,6 +12,7 @@ from app.routers import (
     execution,
     generation,
     mapping,
+    reporting,
     text_cases,
     worker,
 )
@@ -55,6 +56,7 @@ app.include_router(confirmation.router)
 app.include_router(generation.router)
 app.include_router(catalog.router)
 app.include_router(execution.router)
+app.include_router(reporting.router)
 app.include_router(worker.router)
 
 
