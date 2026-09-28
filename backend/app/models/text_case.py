@@ -48,6 +48,10 @@ class TextCase(Base):
     # 状态——running 期间用例停留在 elaborating/mapped，作业细粒度状态存于此
     # （running/succeeded/failed），结构见 app.mapping 与 schemas.MappingJobOut。
     mapping_job: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # 所需拓扑（T11，故事 16）：{"bbu": 1, "ue": 2, "instrument": [...]} 等
+    # BBU/UE/仪表组合声明，execute/recheck 时作为 LASS 三值校验输入；
+    # None 表示未声明（LASS 按空拓扑校验）
+    required_topology: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

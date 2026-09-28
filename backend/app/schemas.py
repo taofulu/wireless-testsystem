@@ -9,21 +9,29 @@ class TextCaseCreate(BaseModel):
     """新建文本用例：三栏分栏录入，落库为 draft 态。
 
     三栏允许留空——草稿常是半成品，稍后从列表回来补全（用户故事 2）。
+    required_topology（故事 16）：所需拓扑声明（BBU/UE/仪表组合），可后补；
+    执行前由 LASS 三值校验消费。
     """
 
     title: str = Field(min_length=1, max_length=200)
     precondition: str = ""
     steps_text: str = ""
     expected_text: str = ""
+    required_topology: Optional[dict[str, Any]] = None
 
 
 class TextCasePatch(BaseModel):
-    """草稿继续编辑：仅允许修改三栏内容与标题，不回退状态。"""
+    """草稿继续编辑：仅允许修改三栏内容、标题与所需拓扑，不回退状态。
+
+    required_topology 是执行元数据而非扩写评估输入：改它不动扩写闸门
+    （apply_text_case_patch 的闸门字段集不含拓扑）。
+    """
 
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     precondition: Optional[str] = None
     steps_text: Optional[str] = None
     expected_text: Optional[str] = None
+    required_topology: Optional[dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +267,7 @@ class ExecutableCodeOut(ExecutableCaseOut):
 
 
 class TextCaseOut(BaseModel):
-    """文本用例对外视图（追溯/拓扑字段后续票补充）。"""
+    """文本用例对外视图（追溯字段后续票补充）。"""
 
     id: int
     title: str
@@ -267,6 +275,7 @@ class TextCaseOut(BaseModel):
     steps_text: str
     expected_text: str
     status: str
+    required_topology: Optional[dict[str, Any]] = None
     elaboration: Optional[ElaborationOut] = None
     mapping: Optional[MappingJobOut] = None
     created_at: datetime
@@ -488,17 +497,22 @@ class TaskClaimOut(BaseModel):
 class TaskResultIn(BaseModel):
     """Worker 执行完成后的结果回传。
 
-    verdict 三态（ADR-0009）：passed/failed/inconclusive；inconclusive 由
-    沙盒内核在存在仅桩校验或未仿真步骤时产出（禁止假绿）。
+    verdict 取值（ADR-0009 + T12）：
+    - passed/failed/inconclusive：沙盒三态（inconclusive 由沙盒内核在存在
+      仅桩校验或未仿真步骤时产出，禁止假绿）；real 通路断言失败为 failed
+    - env_failed：real 通路环境类失败（场景文件不可达/无权限等），与断言
+      失败 failed 在判决上区分（故事 53）
+    allure_report：real 通路回传的 Allure 结果原文（T13 做步骤级解析）
     """
 
     model_config = {"extra": "forbid"}
 
     worker_id: str = Field(min_length=1, max_length=100)
-    verdict: Literal["passed", "failed", "inconclusive"]
+    verdict: Literal["passed", "failed", "inconclusive", "env_failed"]
     logs: str
     step_results: list[Any] = Field(default_factory=list)
     artifacts: list[Any] = Field(default_factory=list)
+    allure_report: Optional[dict[str, Any]] = None
 
 
 class TaskResultOut(BaseModel):
@@ -511,13 +525,47 @@ class TaskResultOut(BaseModel):
 
 
 class ExecutionTaskOut(BaseModel):
-    """任务简要视图。"""
+    """任务简要视图（含 T11 环境校验结论：阻断任务的阻断原因随任务呈现）。"""
 
     id: int
     executable_case_id: int
     execution_target: str
     status: str
     worker_id: Optional[str] = None
+    env_check_result: Optional[str] = None
+    env_check_detail: Optional[dict[str, Any]] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutionResultOut(BaseModel):
+    """执行结果视图（T12）：判决、日志、逐步骤、制品与 Allure 原文。"""
+
+    task_id: int
+    verdict: str
+    logs: str
+    step_results: list[Any]
+    artifacts: list[Any]
+    allure_report: Optional[dict[str, Any]] = None
+    sim_package_version: Optional[str] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ExecutionRecordOut(BaseModel):
+    """一次真实执行的任务 + 结果合成视图（结果页/追溯列表用）。"""
+
+    id: int
+    executable_case_id: int
+    execution_target: str
+    status: str
+    worker_id: Optional[str] = None
+    env_check_result: Optional[str] = None
+    env_check_detail: Optional[dict[str, Any]] = None
+    created_at: datetime
+    finished_at: Optional[datetime] = None
+    result: Optional[ExecutionResultOut] = None
 
     model_config = {"from_attributes": True}
 

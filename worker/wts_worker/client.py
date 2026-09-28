@@ -25,7 +25,8 @@ class WorkerClient:
         sim_package_version: Optional[str] = None,
         topology_tags: Optional[List[str]] = None,
     ):
-        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=30.0)
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.Client(base_url=self.base_url, timeout=30.0)
         self.worker_id = worker_id
         self.capabilities = capabilities
         self.sim_package_version = sim_package_version
@@ -112,8 +113,13 @@ class WorkerClient:
         logs: str,
         step_results: List[Any],
         artifacts: List[Any],
+        allure_report: Optional[dict] = None,
     ) -> dict:
-        """执行完成后回传结果；409 表示该结果已记录（重试安全）。"""
+        """执行完成后回传结果；409 表示该结果已记录（重试安全）。
+
+        allure_report 为 testbed 侧 Allure 结果原文（T12，real 通路落库
+        execution_result；沙盒通路不传）。
+        """
         resp = self._client.post(
             f"/worker/tasks/{task_id}/result",
             json={
@@ -122,6 +128,7 @@ class WorkerClient:
                 "logs": logs,
                 "step_results": step_results,
                 "artifacts": artifacts,
+                **({"allure_report": allure_report} if allure_report is not None else {}),
             },
         )
         resp.raise_for_status()

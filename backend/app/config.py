@@ -29,5 +29,14 @@ class Settings(BaseSettings):
     # （ADR-0009 / spec Further Notes：debug_run 保留次数 N 为配置项，初值 20）
     debug_run_keep_latest: int = 20
 
+    # LASS 环境校验（T11）：环境中台校验 API 基地址与超时。空串即未配置——
+    # 校验未发生不产生任何环境结论（execute/recheck 拒绝并提示，不默认放行）
+    lass_api_url: str = ""
+    lass_timeout_seconds: float = 10.0
+
+    # 场景文件供给（T12）：MBB 场景库 API 未定（外部依赖 E3）的本地降级——
+    # Worker 凭 scenario_id+version 从本目录拉取文件（GET …/file 提供）
+    scenario_files_dir: str = str(Path(_DEFAULT_CATALOG_DIR) / "scenario_files")
+
 
 settings = Settings()

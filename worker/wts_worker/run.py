@@ -19,7 +19,7 @@ from typing import List, Optional
 import httpx
 
 from wts_worker.client import WorkerClient
-from wts_worker.runner import TaskOutcome, run_pytest_case, run_sandbox_case
+from wts_worker.runner import TaskOutcome, run_real_case, run_sandbox_case
 
 
 class _Heartbeat:
@@ -105,6 +105,7 @@ def _submit_with_retry(
                 logs=outcome.logs,
                 step_results=outcome.step_results,
                 artifacts=outcome.artifacts,
+                allure_report=outcome.allure_report,
             )
             return
         except httpx.HTTPStatusError as exc:
@@ -124,12 +125,14 @@ def _execute_task(
     work_root: Path,
     task_timeout: float,
     sim_package_dir: str,
+    aw_package_dir: str,
 ) -> TaskOutcome:
     """按任务 execution_target 分发执行通路（ADR-0009 能力路由的 Worker 侧）。
 
     - sandbox：拉取沙盒上下文（仿真供给 + 调试预设），走 T9 沙盒内核，
       产出三态判决与逐步骤仿真标注
-    - real：T8 真实通路（L1 桩包 pytest；真实 AW 接入在 T12）
+    - real：T12 真实通路（testbed AW 包 + real_report.json 报告协议；
+      server_url 注入子进程供场景文件拉取降级通道使用）
     """
     task_id = task["task_id"]
     exec_id = task["executable_case_id"]
@@ -143,7 +146,13 @@ def _execute_task(
             timeout_seconds=task_timeout,
             sim_package_dir=sim_package_dir,
         )
-    return run_pytest_case(code, work_root, timeout_seconds=task_timeout)
+    return run_real_case(
+        code,
+        work_root,
+        timeout_seconds=task_timeout,
+        aw_package_dir=aw_package_dir,
+        server_url=client.base_url,
+    )
 
 
 def run_worker(
@@ -157,6 +166,7 @@ def run_worker(
     task_timeout: float = 600.0,
     sim_package_version: Optional[str] = None,
     sim_package_dir: str = "",
+    aw_package_dir: str = "",
     once: bool = False,
 ) -> int:
     """Worker 主循环；返回进程退出码。"""
@@ -192,6 +202,7 @@ def run_worker(
                     work_root=work_root,
                     task_timeout=task_timeout,
                     sim_package_dir=sim_package_dir,
+                    aw_package_dir=aw_package_dir,
                 )
             except Exception as exc:  # Worker 自身不随任务崩溃
                 outcome = TaskOutcome(verdict="failed", logs=f"worker 内部错误: {exc}")

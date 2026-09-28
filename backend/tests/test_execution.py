@@ -17,38 +17,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
-
-from app.config import settings
 from app.db import SessionLocal
 from app.models.execution import ExecutionTask, Worker
 
-FIXTURE = Path(__file__).parent / "fixtures" / "fake_glm_cli.py"
 CATALOG_DATA = Path(__file__).resolve().parents[1] / "app" / "catalog_data"
 
 
 # ---------------------------------------------------------------------------
 # 夹具与助手
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def fake_cli(monkeypatch):
-    monkeypatch.setattr(settings, "glm_cli_path", str(FIXTURE), raising=False)
-    monkeypatch.setattr(settings, "glm_elaboration_skill", "elaboration-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_mapping_skill", "mapping-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_timeout_seconds", 10.0, raising=False)
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
-    from app import elaboration, mapping
-
-    elaboration._running_jobs.clear()
-    elaboration._active_procs.clear()
-    mapping._running_jobs.clear()
-    mapping._active_procs.clear()
-    yield settings
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
+# fake_cli 夹具统一由 conftest 提供（系统边界 fake，ADR-0006）
 
 
 def _import_demo_dictionary(client) -> None:

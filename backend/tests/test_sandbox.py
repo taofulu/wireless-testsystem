@@ -32,27 +32,16 @@ from app.sandbox import (
     worst_level,
 )
 
-FIXTURE = Path(__file__).parent / "fixtures" / "fake_glm_cli.py"
+# fake_cli 夹具统一由 conftest 提供（系统边界 fake，ADR-0006）
 
 
-@pytest.fixture()
-def fake_cli(monkeypatch):
-    """与 test_execution 相同：GLM CLI 走 fake 脚本（系统边界 fake）。"""
-    monkeypatch.setattr(settings, "glm_cli_path", str(FIXTURE), raising=False)
-    monkeypatch.setattr(settings, "glm_elaboration_skill", "elaboration-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_mapping_skill", "mapping-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_timeout_seconds", 10.0, raising=False)
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
-    from app import elaboration, mapping
+@pytest.fixture(autouse=True)
+def _lass_ready(fake_lass):
+    """T10 沙盒闸门测试不关注环境分支：LASS 恒 ready（T11 起 execute 必经 LASS）。
 
-    elaboration._running_jobs.clear()
-    elaboration._active_procs.clear()
-    mapping._running_jobs.clear()
-    mapping._active_procs.clear()
-    yield settings
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
+    三值分支的专项测试在 test_env_check.py；本文件只需要"校验通过"一条边。
+    """
+    fake_lass.respond({"result": "ready"})
 
 
 # ---------------------------------------------------------------------------

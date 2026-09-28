@@ -66,6 +66,12 @@ class ExecutionTask(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # LASS 三值环境校验（T11）：ready/needs_create/needs_modify；
+    # 阻断任务（needs_*）status=done 且两列携带缺失清单/差异说明（故事 19-21）
+    env_check_result: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True
+    )
+    env_check_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     result: Mapped[Optional["ExecutionResult"]] = relationship(
         back_populates="task", lazy="joined"
@@ -92,6 +98,8 @@ class ExecutionResult(Base):
     sim_package_version: Mapped[Optional[str]] = mapped_column(
         String(50), nullable=True
     )
+    # Allure 结果原文（T12 real 通路回传；步骤级解析与追溯映射在 T13）
+    allure_report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
     )

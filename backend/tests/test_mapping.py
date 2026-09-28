@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pytest
 
-from app.config import settings
 from app.db import SessionLocal
 from app.mapping import (
     BadMappingResult,
@@ -33,7 +32,6 @@ from app.models import TextCase
 from app.models.mapping import MappingStatus
 from app.schemas import MappingCLIResult, MappingCLIStepIn
 
-FIXTURE = Path(__file__).parent / "fixtures" / "fake_glm_cli.py"
 CATALOG_DATA = Path(__file__).resolve().parents[1] / "app" / "catalog_data"
 
 MAPPING_PATH = "/text-cases/{id}/mapping"
@@ -41,30 +39,8 @@ STEPS_PATH = "/text-cases/{id}/steps"
 
 
 # ---------------------------------------------------------------------------
-# 夹具
+# 夹具：fake_cli 统一由 conftest 提供（系统边界 fake，ADR-0006；默认 unmapped 场景）
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture()
-def fake_cli(monkeypatch):
-    """把后端 GLM CLI 指向 fake 可执行脚本；默认 10s 超时、unmapped 场景。"""
-    monkeypatch.setattr(settings, "glm_cli_path", str(FIXTURE), raising=False)
-    monkeypatch.setattr(settings, "glm_elaboration_skill", "elaboration-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_mapping_skill", "mapping-skill", raising=False)
-    monkeypatch.setattr(settings, "glm_timeout_seconds", 10.0, raising=False)
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
-    # slow 场景残留的 daemon 作业可能跨用例存活；清掉两个模块的进程内登记，
-    # 避免清表后复用 case_id 时首触发被误判 409。
-    from app import elaboration, mapping
-
-    elaboration._running_jobs.clear()
-    elaboration._active_procs.clear()
-    mapping._running_jobs.clear()
-    mapping._active_procs.clear()
-    yield settings
-    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
-        monkeypatch.delenv(var, raising=False)
 
 
 def _set_mapping_scenario(monkeypatch, scenario: str):

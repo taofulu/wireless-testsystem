@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="AW 团队 Python 仿真包目录（simulatable=python 的操作由此加载；可选）",
     )
+    run_parser.add_argument(
+        "--aw-package-dir",
+        default="",
+        help="testbed 侧 AW 包目录（real 通路必需：真实 testbed 机上为真包）",
+    )
     return parser
 
 
@@ -91,6 +96,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             task_timeout=args.task_timeout,
             sim_package_version=args.sim_package_version,
             sim_package_dir=args.sim_package_dir,
+            aw_package_dir=args.aw_package_dir,
             once=args.once,
         )
     return 2

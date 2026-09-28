@@ -1,15 +1,19 @@
-"""T8 real 通路端到端守护：真实 wts-worker 进程 + 真实 pytest 子进程。
+"""T12 real 通路端到端守护：真实 wts-worker 进程 + 真实 pytest 子进程。
 
-用标准库 HTTP 服务器扮演后端（fake 只注在系统边界），断言完整链路：
-注册 → 心跳 → claim → 拉代码 → 临时落盘 → pytest 执行（桩 AW）→
-结果回传 → 临时目录清理。
+用标准库 HTTP 服务器扮演后端（fake 只注在系统边界），伪 testbed AW 夹具
+（tests/fixtures/testbed_aw）扮演真实 testbed 的 AW/allure 包，断言完整链路：
+注册 → 心跳 → claim → 拉代码 → 临时落盘 → pytest 执行 → real_report.json
+报告协议回收（Allure/制品/env_failed）→ 结果回传 → 临时目录清理。
 
-与 Issue #9 验收对应：
-- "Worker 拉取代码临时落盘、执行后清理，回传结果"
-- "沙盒模式用真实 pytest 子进程 + 桩 AW 包做端到端守护"
+与 Issue #13 验收对应：
+- "real 任务只被 real Worker 领取；执行器以真实 pytest 子进程守护（伪
+  testbed AW 夹具）"
+- "Allure 结果回传落库 execution_result"（回传载荷携带 allure_report）
+- "long_running 操作产出 artifacts（name/kind/uri/checksum）"
+- "play_scenario 场景文件传递：无直通时 Worker 凭 ID 拉取后上传；不可达
+  归类为环境类失败"
 
-T9 之后：execution_target=sandbox 的任务走沙盒内核（见 test_sandbox_e2e.py）；
-本文件守护 real 通路（T8 L1 桩包，真实 AW 接入在 T12）。
+T9 之后：execution_target=sandbox 的任务走沙盒内核（见 test_sandbox_e2e.py）。
 """
 import http.server
 import json
@@ -20,6 +24,8 @@ import threading
 from pathlib import Path
 
 import pytest
+
+FIXTURE_AW = Path(__file__).parent / "fixtures" / "testbed_aw"
 
 # 一段通过的可执行用例（与 rendering 模块产出形状一致：allure + aw 调用）
 PASSING_CODE = '''"""沙盒演示用例"""
@@ -55,6 +61,42 @@ def test_demo_fail():
 '''
 
 
+# 长时操作 + 场景播放的可执行用例（与 rendering 的 long_running/composite
+# 模板产出形状一致）
+LONG_RUNNING_CODE = '''"""导出日志用例"""
+
+import allure
+
+import aw
+
+
+@allure.suite("demo")
+def test_export_logs():
+    """导出日志用例"""
+    with allure.step("步骤1: 导出 BBU 日志"):
+        result_1 = aw.bbu.export_logs(log_type='alarm')
+        aw.wait_completion(result_1)
+        aw.collect_artifacts(result_1)  # 制品：testbed 侧路径与校验和
+        assert result_1 is not None
+'''
+
+PLAY_SCENARIO_CODE = '''"""场景播放用例"""
+
+import allure
+
+import aw
+
+
+@allure.suite("demo")
+def test_play_scenario():
+    """场景播放用例"""
+    with allure.step("步骤1: 上传并播放场景文件"):
+        result_1 = aw.instrument.play_scenario(
+            scenario_id='SC-E2E', scenario_version='v1')
+        assert result_1.ok
+'''
+
+
 def _worker_exe() -> str:
     exe = Path(sys.executable).parent / "wts-worker"
     assert exe.exists(), f"wts-worker 未随包安装: {exe}"
@@ -64,14 +106,16 @@ def _worker_exe() -> str:
 class _FakeBackend:
     """记录请求的最小假后端：单任务队列，claim 一次后返回 204。"""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, scenario_files=None):
         self.code = code
+        self.scenario_files = scenario_files or {}
         self.registered = []
         self.heartbeats = 0
         self.task_heartbeats = 0
         self.claims = 0
         self.results = []
         self.fetched_code = 0
+        self.scenario_hits = []
 
 
 def _make_handler(state: _FakeBackend):
@@ -94,6 +138,15 @@ def _make_handler(state: _FakeBackend):
                 state.fetched_code += 1
                 self._json(200, {"id": 1, "text_case_id": 1, "version": 1,
                                  "created_at": "2026-09-27T00:00:00Z", "code": state.code})
+            elif self.path.startswith("/scenarios/") and self.path.endswith("/file"):
+                # 场景文件降级供给（T12）：{id}--{version} 命中 200，否则 404
+                state.scenario_hits.append(self.path)
+                parts = self.path.strip("/").split("/")
+                key = f"{parts[1]}--{parts[2]}" if len(parts) == 4 else ""
+                if key in state.scenario_files:
+                    self._json(200, state.scenario_files[key])
+                else:
+                    self._json(404, {"detail": "scenario file unreachable"})
             else:
                 self._json(404, {"detail": "not found"})
 
@@ -136,8 +189,8 @@ def backend():
     """启动假后端，返回 (base_url, state)。"""
     holder = {}
 
-    def _start(code):
-        state = _FakeBackend(code)
+    def _start(code, scenario_files=None):
+        state = _FakeBackend(code, scenario_files=scenario_files)
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), _make_handler(state))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         holder["server"] = server
@@ -167,6 +220,8 @@ def _run_worker(base_url: str, work_root: Path, extra_args=()) -> subprocess.Com
             "0.1",
             "--task-timeout",
             "60",
+            "--aw-package-dir",
+            str(FIXTURE_AW),
             "--once",
             *extra_args,
         ],
@@ -191,6 +246,8 @@ def test_e2e_passing_case_full_path(backend, tmp_path):
     assert result["worker_id"] == "e2e-real-01"
     assert result["verdict"] == "passed"
     assert "1 passed" in result["logs"]
+    # Allure 结果经报告协议随回传落库（T12，Issue #13）
+    assert result["allure_report"]["steps"][0]["status"] == "passed"
     # 临时落盘执行后清理（故事 30）
     assert list(tmp_path.iterdir()) == []
 
@@ -214,3 +271,40 @@ def test_e2e_empty_queue_exits_clean(backend, tmp_path):
     assert state.claims == 1
     assert state.results == []
     assert state.fetched_code == 0
+
+
+def test_e2e_long_running_artifacts_reported(backend, tmp_path):
+    """长时操作制品随结果回传：name/kind/uri/checksum（故事 54，文件不出 testbed）。"""
+    base_url, state = backend(LONG_RUNNING_CODE)
+    proc = _run_worker(base_url, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(state.results) == 1
+    result = state.results[0]
+    assert result["verdict"] == "passed"
+    assert len(result["artifacts"]) == 1
+    artifact = result["artifacts"][0]
+    assert artifact["kind"] == "log_package"
+    assert artifact["uri"].startswith("file:///testbed/artifacts/")
+    assert artifact["checksum"].startswith("sha256:")
+
+
+def test_e2e_play_scenario_fetch_upload_fallback(backend, tmp_path):
+    """无直通通道：Worker 凭 scenario_id+version 从后端拉取场景文件后上传（故事 53）。"""
+    base_url, state = backend(
+        PLAY_SCENARIO_CODE, scenario_files={"SC-E2E--v1": {"scenario": "demo"}}
+    )
+    proc = _run_worker(base_url, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert state.scenario_hits == ["/scenarios/SC-E2E/v1/file"]
+    assert state.results[0]["verdict"] == "passed"
+
+
+def test_e2e_play_scenario_unreachable_is_env_failed(backend, tmp_path):
+    """场景文件不可达：归类环境类失败 env_failed，区别于断言失败（故事 53）。"""
+    base_url, state = backend(PLAY_SCENARIO_CODE)  # 场景库为空：拉取 404
+    proc = _run_worker(base_url, tmp_path)
+    assert proc.returncode == 0, proc.stderr  # 任务失败不拖垮 Worker 进程
+    assert len(state.results) == 1
+    result = state.results[0]
+    assert result["verdict"] == "env_failed"
+    assert "scenario_unreachable" in result["logs"]

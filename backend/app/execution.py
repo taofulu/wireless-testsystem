@@ -1,7 +1,9 @@
 """execution 模块：Worker 注册/心跳/能力路由领取/结果回传与沙盒调试任务（T8）；
-T9/T10 加入调试会话落库与真实执行二次确认闸门。
+T9/T10 加入调试会话落库与真实执行二次确认闸门；T11 插入 LASS 三值环境校验
+闸门（execute/recheck）；T12 接通 real 通路用例状态迁移（queued→running→done）
+与 Allure 结果落库。
 
-职责（spec 模块划分 execution 的 T8 切片；LASS 校验与真实执行在 T11/T12）：
+职责（spec 模块划分 execution）：
 - Worker 注册表：启动注册（同 worker_id 重复注册视为续约更新）、保活心跳、
   心跳超时摘除
 - 任务队列：execution_task 行即队列（DB 唯一主存，ADR-0005）；沙盒调试任务由
@@ -17,6 +19,12 @@ T9/T10 加入调试会话落库与真实执行二次确认闸门。
 - 真实执行闸门（T10）：依据该代码版本最近一次调试会话判决放行——passed 直接
   入队；inconclusive/无调试结论须带二次确认标记（响应附未覆盖步骤清单）；
   failed 一律拒绝，只许回上游修复（故事 43/44）
+- LASS 三值环境校验（T11，故事 17-22）：沙盒闸门通过后调用 LASS 校验所需
+  拓扑——ready 入队；needs_create/needs_modify 阻断（任务转 done 并带
+  env_check_result/env_check_detail，用例转 done）；环境中台处理后经
+  recheck 复检闭环。LASS 不可达不产生任何环境结论（不假绿）
+- real 通路状态迁移（T12）：real 任务被领取 → 用例 queued→running；结果
+  回传 → running→done；Allure 结果原文随 execution_result 落库
 
 并发说明：sqlite 测试库经 WAL + busy_timeout 串行化写者；生产 PostgreSQL
 下条件 UPDATE 的行级谓词同样保证原子领取，无需 SELECT FOR UPDATE。
@@ -24,7 +32,8 @@ T9/T10 加入调试会话落库与真实执行二次确认闸门。
 已知边界（MVP 接受）：任务因心跳超时被回收重领后，原 Worker 若仍在执行，
 两个执行者会并发跑同一任务——原 Worker 回传时得 409，结果不被覆盖，但
 "重复执行"本身无法在超时窗口内被阻止（fencing token 出 MVP 范围；沙盒
-任务幂等无害，real 通路的防护在 T12 评估）。
+任务幂等无害；real 通路同一用例同一时刻最多一个在跑任务由状态机保证：
+execute/recheck 放行后用例即离开 generated/done 态，重复提交被 409 拦截）。
 """
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
@@ -32,6 +41,7 @@ from typing import Any, Optional, Sequence
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app import lass
 from app.config import settings
 from app.models import ExecutableCase, TextCase, TextCaseStatus
 from app.models.execution import ExecutionResult, ExecutionTask, Worker
@@ -224,12 +234,39 @@ def claim_task(
         if result.rowcount != 1:
             db.rollback()  # 被并发 Worker 抢先，重选候选
             continue
+        if candidate.execution_target == "real":
+            # T12：real 任务被领取即用例 queued → running（沙盒调试在 generated
+            # 态内闭环，不迁移用例状态）
+            _transition_case(db, candidate, {TextCaseStatus.QUEUED}, TextCaseStatus.RUNNING)
         worker.last_heartbeat = now
         db.commit()
         db.refresh(candidate)
         return candidate
 
     return None  # 连续撞车（理论上限），Worker 下轮轮询再来
+
+
+# ---------------------------------------------------------------------------
+# 用例状态迁移助手（real 通路，T12）
+# ---------------------------------------------------------------------------
+
+
+def _transition_case(
+    db: Session,
+    task: ExecutionTask,
+    allowed_from: set[TextCaseStatus],
+    to: TextCaseStatus,
+) -> None:
+    """real 任务驱动的用例状态迁移；当前状态不在 allowed_from 时不动（防御）。
+
+    沙盒任务永不调用本函数（调试在 generated 态内闭环，ADR-0009）。
+    """
+    exec_case = db.get(ExecutableCase, task.executable_case_id)
+    if exec_case is None:
+        return
+    case = db.get(TextCase, exec_case.text_case_id)
+    if case is not None and case.status in allowed_from:
+        case.status = to
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +304,8 @@ def submit_result(
     Worker 侧将 409 视为"已记录"（故事 29 幂等）。
     沙盒通路不迁移用例状态（generated 态内闭环），回传同时落 debug_run
     调试会话（T9：三态判决 + 逐步骤仿真标注 + preset 快照，保留最近 N 次）；
-    real 通路状态机在 T12。
+    real 通路（T12）回传即用例 running → done，Allure 结果原文随
+    execution_result 落库（步骤级解析在 T13）。
     sim_package_version 取执行 Worker 的注册声明（ADR-0009：沙盒报告记录仿真
     包版本，为仿真与 catalog 漂移排查留证据），不信任 Worker 回传自报。
     """
@@ -288,9 +326,14 @@ def submit_result(
         logs=payload.logs,
         step_results=payload.step_results,
         artifacts=payload.artifacts,
+        allure_report=payload.allure_report,
         sim_package_version=worker.sim_package_version,
     )
     db.add(result)
+    if task.execution_target == "real":
+        _transition_case(
+            db, task, {TextCaseStatus.RUNNING, TextCaseStatus.QUEUED}, TextCaseStatus.DONE
+        )
     db.commit()
     db.refresh(result)
 
@@ -306,7 +349,7 @@ def submit_result(
 
 
 # ---------------------------------------------------------------------------
-# 真实执行提交（T10 闸门骨架；LASS 三值校验在 T11 插入）
+# 真实执行提交（T10 沙盒判决闸门 + T11 LASS 三值环境校验闸门）
 # ---------------------------------------------------------------------------
 
 
@@ -336,20 +379,8 @@ def _all_step_seqs(db: Session, exec_case: ExecutableCase) -> list[int]:
     )
 
 
-def submit_real_execution(
-    db: Session, exec_case: ExecutableCase, confirm_inconclusive: bool
-) -> ExecutionTask:
-    """提交真实执行（POST /executable-cases/{id}/execute，故事 43/44）。
-
-    闸门依据该代码版本最近一次调试会话判决：
-    - passed：直接放行入队（不需要确认）
-    - failed：一律拒绝——沙盒失败只许回上游修复并重新生成新版本（ADR-0009）
-    - inconclusive / 尚无调试结论：必须携带 confirm_inconclusive 二次确认
-      标记；未携带时返回未覆盖步骤清单（仅桩校验/未仿真步骤）供知情决策
-
-    放行即创建 execution_target=real 的 queued 任务，用例状态 generated →
-    queued（spec 状态机）；LASS 三值环境校验在 T11 插入本函数放行点之前。
-    """
+def _check_sandbox_gate(db: Session, exec_case: ExecutableCase, confirm_inconclusive: bool) -> None:
+    """T10 沙盒判决闸门：passed 放行；failed 拒绝；inconclusive 须二次确认。"""
     case = db.get(TextCase, exec_case.text_case_id)
     if case is None or case.status != TextCaseStatus.GENERATED:
         raise ExecuteConflict(
@@ -380,13 +411,83 @@ def submit_real_execution(
                 uncovered=uncovered,
             )
 
+
+def _create_real_task(
+    db: Session,
+    exec_case: ExecutableCase,
+    case: TextCase,
+    outcome: lass.EnvCheckOutcome,
+) -> ExecutionTask:
+    """按 LASS 三值结论落地 real 任务与用例状态（故事 17-21）。
+
+    - ready：任务 queued 等待 real Worker 领取，用例 generated/done → queued
+    - needs_create/needs_modify：阻断——任务直接 done 并携带
+      env_check_result/env_check_detail（缺失清单/差异说明），用例 → done；
+      不占用 Worker 队列（环境中台处理后经 recheck 闭环，故事 22）
+    """
+    now = _utcnow()
+    ready = outcome.result == "ready"
     task = ExecutionTask(
         executable_case_id=exec_case.id,
         execution_target="real",
-        status="queued",
+        status="queued" if ready else "done",
+        env_check_result=outcome.result,
+        env_check_detail=outcome.detail,
+        finished_at=None if ready else now,
     )
     db.add(task)
-    case.status = TextCaseStatus.QUEUED
+    case.status = TextCaseStatus.QUEUED if ready else TextCaseStatus.DONE
     db.commit()
     db.refresh(task)
     return task
+
+
+def submit_real_execution(
+    db: Session, exec_case: ExecutableCase, confirm_inconclusive: bool
+) -> ExecutionTask:
+    """提交真实执行（POST /executable-cases/{id}/execute，故事 17-21、43/44）。
+
+    闸门顺序（先软件正确性、后环境可用性）：
+    1. T10 沙盒判决闸门（见 _check_sandbox_gate）
+    2. T11 LASS 三值环境校验：以用例声明的所需拓扑（required_topology）调
+       LASS；ready 入队，needs_create/needs_modify 阻断转 done 并附差异
+    LASS 未配置/不可达抛 lass.LassUnavailable（路由转 503）——校验未发生
+    不产生任何环境结论（不假绿）。
+    """
+    _check_sandbox_gate(db, exec_case, confirm_inconclusive)
+    case = db.get(TextCase, exec_case.text_case_id)
+    assert case is not None  # 闸门已校验存在性
+    outcome = lass.check_topology(case.required_topology)
+    return _create_real_task(db, exec_case, case, outcome)
+
+
+def recheck_env(db: Session, exec_case: ExecutableCase) -> ExecutionTask:
+    """环境复检（POST /executable-cases/{id}/env-recheck，故事 22）。
+
+    环境中台完成新建/修改后再次触发 LASS 校验：ready 则新开 queued 任务、
+    用例 done → queued；仍 needs_* 则新落一条阻断任务（保留历史）。仅最近
+    real 任务为环境阻断（done 且 env_check_result 为 needs_*）的用例可复检，
+    其余状态 409。
+    """
+    case = db.get(TextCase, exec_case.text_case_id)
+    if case is None:
+        raise ExecuteConflict("not_found", "用例不存在")
+    latest_real = db.execute(
+        select(ExecutionTask)
+        .where(
+            ExecutionTask.executable_case_id == exec_case.id,
+            ExecutionTask.execution_target == "real",
+        )
+        .order_by(ExecutionTask.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    blocked = latest_real is not None and latest_real.env_check_result in (
+        "needs_create",
+        "needs_modify",
+    )
+    if case.status != TextCaseStatus.DONE or not blocked:
+        raise ExecuteConflict(
+            "not_blocked", "仅环境校验阻断（done）的用例可发起复检"
+        )
+    outcome = lass.check_topology(case.required_topology)
+    return _create_real_task(db, exec_case, case, outcome)

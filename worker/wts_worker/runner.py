@@ -1,15 +1,29 @@
 """任务执行器：拉取的可执行用例代码 → 临时落盘 → 真实 pytest 子进程（T8）；
-T9 加入沙盒内核执行通路（三态判决与逐步骤仿真标注）。
+T9 加入沙盒内核执行通路（三态判决与逐步骤仿真标注）；T12 real 通路接入
+testbed 侧 AW 包（--aw-package-dir），替换 T8 的 L1 桩包占位。
 
-约束（Issue #9 验收）：
-- 真实 pytest 子进程 + 桩 AW 包，不 mock 执行器
+约束（Issue #9/#13 验收）：
+- 真实 pytest 子进程 + testbed AW 包，不 mock 执行器
 - 临时工作目录执行后清理（本地无需持久存储，故事 30）
 - 超时/崩溃兜底为 failed 判决回传，Worker 自身不随任务崩溃
 
 T9 沙盒通路（run_sandbox_case）：加载后端下发的沙盒上下文（三种仿真供给
 + 调试预设），以沙盒 allure/aw 包驱动逐步骤记录，聚合 passed/failed/
 inconclusive 三态判决（ADR-0009：存在仅桩校验或未仿真步骤即不可判定，
-禁止假绿）。real 通路仍走 T8 桩包，真实 AW 接入在 T12。
+禁止假绿）。
+
+T12 real 通路（run_real_case）Worker ↔ testbed 报告协议：子进程环境注入
+WTS_REAL_WORKDIR（任务临时目录）与 WTS_SERVER_URL（后端基地址，场景文件
+无直通时的拉取降级通道，故事 53）；testbed 侧（真实 AW/allure 或伪夹具）
+把 ``real_report.json`` 写入 WTS_REAL_WORKDIR::
+
+    {"allure_report": {...} | null,
+     "artifacts": [{"name", "kind", "uri", "checksum"}],
+     "env_error": {"code": ..., "detail": ...} | null}
+
+判决规则：env_error 非空 → env_failed（环境类失败与断言失败区分，故事 53）；
+否则 pytest 退出码 0 → passed、非 0 → failed。报告缺失/损坏按无报告处理
+（子进程早夭不退回假绿）。
 """
 import json
 import os
@@ -26,20 +40,23 @@ from wts_worker.sandbox import (
     merge_step_results,
     write_sandbox_packages,
 )
-from wts_worker.stubs import write_stub_packages
 
 # 单条任务日志回传上限（尾保留）：防止超长输出打爆请求体
 MAX_LOG_CHARS = 100_000
+
+# testbed 侧报告文件名（Worker ↔ testbed 报告协议，见模块 docstring）
+REAL_REPORT_NAME = "real_report.json"
 
 
 @dataclass
 class TaskOutcome:
     """一次任务执行的结论；verdict 取值与后端 TaskResultIn 契约一致。"""
 
-    verdict: str  # "passed" | "failed"
+    verdict: str  # "passed" | "failed" | "inconclusive" | "env_failed"
     logs: str
     step_results: List[Any] = field(default_factory=list)
     artifacts: List[Any] = field(default_factory=list)
+    allure_report: Optional[dict] = None
 
 
 def _tail(text: str) -> str:
@@ -61,24 +78,38 @@ def _with_pythonpath(env: dict, paths: list[str]) -> dict:
     return env
 
 
-def run_pytest_case(
-    code: str, work_root: Path, timeout_seconds: float = 600.0
+def run_real_case(
+    code: str,
+    work_root: Path,
+    timeout_seconds: float = 600.0,
+    aw_package_dir: str = "",
+    server_url: str = "",
 ) -> TaskOutcome:
-    """在独立临时目录中执行一个可执行用例版本，返回判决与日志。
+    """T12 real 通路：真实 pytest 子进程 + testbed 侧 AW 包执行（故事 30-33、53、54）。
 
-    目录布局：``work_root/wts-task-XXXX/{test_case.py, stubs/{allure,aw}.py}``；
-    子进程以 PYTHONPATH=stubs 运行 ``python -m pytest``，任何路径下结束都
-    清理整个临时目录。
+    目录布局：``work_root/wts-real-XXXX/{test_case.py, real_report.json}``；
+    子进程 PYTHONPATH 注入 testbed AW 包目录（AW 团队供给的真实 testbed 机
+    上为真包，测试为伪夹具），环境注入 WTS_REAL_WORKDIR / WTS_SERVER_URL
+    （报告协议见模块 docstring）；任何路径下结束都清理整个临时目录。
     """
+    if not aw_package_dir:
+        # real 通路没有 AW 包无从执行：诚实失败，不静默退回桩包（不假绿）
+        return TaskOutcome(
+            verdict="failed",
+            logs="未配置 testbed AW 包目录（wts-worker run --aw-package-dir），拒绝执行 real 任务",
+        )
     work_root = Path(work_root)
     work_root.mkdir(parents=True, exist_ok=True)
-    workdir = Path(tempfile.mkdtemp(prefix="wts-task-", dir=work_root))
+    workdir = Path(tempfile.mkdtemp(prefix="wts-real-", dir=work_root))
     try:
-        stubs_dir = workdir / "stubs"
-        write_stub_packages(stubs_dir)
         _write_pytest_case(workdir, code)
 
-        env = _with_pythonpath(os.environ.copy(), [str(stubs_dir)])
+        env = dict(os.environ)
+        env["WTS_REAL_WORKDIR"] = str(workdir)
+        if server_url:
+            env["WTS_SERVER_URL"] = server_url
+        env = _with_pythonpath(env, [aw_package_dir])
+
         try:
             proc = subprocess.run(
                 [
@@ -103,10 +134,41 @@ def run_pytest_case(
                 logs=_tail(f"pytest 执行超时（{timeout_seconds}s），进程已终止\n{partial}"),
             )
         logs = _tail(proc.stdout + proc.stderr)
-        # pytest 退出码：0 全过；1 有用例失败；2/3/4/5 收集/用法/无测试等
-        # T8 通路判决二值：非 0 一律 failed（错误细分在 T9/T13）
-        verdict = "passed" if proc.returncode == 0 else "failed"
-        return TaskOutcome(verdict=verdict, logs=logs)
+
+        # 读 testbed 侧报告（Allure 结果、制品、环境类失败标记）；报告缺失/
+        # 损坏（子进程早夭）按无报告处理——不改变 pytest 退出码的判决证据
+        report: dict = {}
+        report_path = workdir / REAL_REPORT_NAME
+        if report_path.exists():
+            try:
+                parsed = json.loads(report_path.read_text(encoding="utf-8"))
+                if isinstance(parsed, dict):
+                    report = parsed
+            except json.JSONDecodeError:
+                report = {}
+
+        env_error = report.get("env_error")
+        if env_error:
+            # 环境类失败（场景文件不可达/无权限等）：与断言失败在判决上区分
+            verdict = "env_failed"
+            logs = _tail(
+                f"环境类失败 [{env_error.get('code', '?')}]: "
+                f"{env_error.get('detail', '')}\n{logs}"
+            )
+        else:
+            verdict = "passed" if proc.returncode == 0 else "failed"
+        artifacts = report.get("artifacts") or []
+        if not isinstance(artifacts, list):
+            artifacts = []
+        allure_report = report.get("allure_report")
+        if not isinstance(allure_report, dict):
+            allure_report = None
+        return TaskOutcome(
+            verdict=verdict,
+            logs=logs,
+            artifacts=artifacts,
+            allure_report=allure_report,
+        )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

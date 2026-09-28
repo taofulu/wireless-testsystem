@@ -16,6 +16,7 @@ import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # 使 fixtures/ 可导入
 
 # 必须在导入 app.* 之前设置：会话级临时文件库（WAL 旁路文件同目录）
 _db_fd, _DB_PATH = tempfile.mkstemp(prefix="wts-test-", suffix=".db")
@@ -77,3 +78,51 @@ def _clean_tables():
 def client():
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def fake_cli(monkeypatch):
+    """GLM CLI 走 fake 脚本（系统边界 fake，ADR-0006）。
+
+    扩写/映射域所有系统级测试共用；场景由 FAKE_GLM_* 环境变量在各测试内选择。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(
+        settings,
+        "glm_cli_path",
+        str(BACKEND_DIR / "tests" / "fixtures" / "fake_glm_cli.py"),
+        raising=False,
+    )
+    monkeypatch.setattr(settings, "glm_elaboration_skill", "elaboration-skill", raising=False)
+    monkeypatch.setattr(settings, "glm_mapping_skill", "mapping-skill", raising=False)
+    monkeypatch.setattr(settings, "glm_timeout_seconds", 10.0, raising=False)
+    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
+        monkeypatch.delenv(var, raising=False)
+    from app import elaboration, mapping
+
+    elaboration._running_jobs.clear()
+    elaboration._active_procs.clear()
+    mapping._running_jobs.clear()
+    mapping._active_procs.clear()
+    yield settings
+    for var in ("FAKE_GLM_MAPPING", "FAKE_GLM_ELABORATION", "FAKE_GLM_SLEEP_SECONDS"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture()
+def fake_lass(monkeypatch):
+    """fake LASS 环境校验服务器（T11，系统边界 fake；fixtures/fake_lass.py）。
+
+    默认恒 ready；测试用 ``respond()`` 编程三值响应、``requests`` 断言请求。
+    """
+    from app.config import settings
+
+    from fixtures.fake_lass import FakeLass
+
+    fake = FakeLass()
+    monkeypatch.setattr(settings, "lass_api_url", fake.url, raising=False)
+    try:
+        yield fake
+    finally:
+        fake.shutdown()

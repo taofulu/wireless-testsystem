@@ -18,12 +18,13 @@ router = APIRouter(prefix="/text-cases", tags=["text-cases"])
 
 @router.post("", response_model=TextCaseOut, status_code=201)
 def create_text_case(payload: TextCaseCreate, db: Session = Depends(get_db)):
-    """新建文本用例，初始状态 draft。"""
+    """新建文本用例，初始状态 draft；可一并声明所需拓扑（故事 16）。"""
     case = TextCase(
         title=payload.title,
         precondition=payload.precondition,
         steps_text=payload.steps_text,
         expected_text=payload.expected_text,
+        required_topology=payload.required_topology,
         status=TextCaseStatus.DRAFT,
     )
     db.add(case)

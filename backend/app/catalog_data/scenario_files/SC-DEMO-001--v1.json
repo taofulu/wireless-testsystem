@@ -1,0 +1,10 @@
+{
+  "scenario_id": "SC-DEMO-001",
+  "version": "v1",
+  "template_type": "fading",
+  "comment": "演示场景文件（MBB 场景库本地降级目录；真实供给待外部依赖 E3）",
+  "payload": {
+    "channels": [{"model": "TDL-A", "delay_ns": 300}],
+    "duration_s": 60
+  }
+}
